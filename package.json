@@ -1,0 +1,27 @@
+{
+  "name": "gwen",
+  "version": "0.1.0",
+  "description": "Gwen, a concierge agent on the OpenRouter Agent SDK with pluggable chat adapters",
+  "type": "module",
+  "private": true,
+  "engines": { "node": ">=22.5" },
+  "scripts": {
+    "build": "tsc -p .",
+    "typecheck": "tsc -p . --noEmit",
+    "start": "node dist/main.js",
+    "dev": "tsx src/main.ts",
+    "test": "node --test --import tsx test/*.test.ts"
+  },
+  "dependencies": {
+    "@openrouter/agent": "1.2.2",
+    "nostr-tools": "^2.10.0",
+    "ws": "^8.18.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

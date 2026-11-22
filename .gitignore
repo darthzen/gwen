@@ -1,0 +1,11 @@
+node_modules/
+dist/
+data/
+.env
+*.key
+
+# Not part of the service; kept out of the repo for now (Rick, 2026-11-22).
+assets/
+previews/
+scripts/
+.DS_Store
