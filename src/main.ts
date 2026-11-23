@@ -44,7 +44,7 @@ async function main(): Promise<void> {
     if (stopping) return;
     stopping = true;
     log.info('gwen stopping', { why });
-    await Promise.allSettled(adapters.map((a) => a.stop()));
+    await Promise.allSettled([...adapters.map((a) => a.stop()), gwen.stop()]);
     process.exit(0);
   };
   process.on('SIGTERM', () => void shutdown('SIGTERM'));

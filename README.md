@@ -14,7 +14,8 @@ a background job and its report arrives later as a message of its own.
 |---|---|
 | `src/gwen.ts` | The turn loop |
 | `src/frame.ts` | Every word the model is shown about a turn (pure functions) |
-| `src/tools/` | Tools the model can call: web, memory, history, library, research, sandbox |
+| `src/tools/` | Tools the model can call: web, memory, history, library, research, sandbox, skills |
+| `src/skills.ts`, `src/mcp.ts` | Skills: procedures and MCP servers she loads only when a job needs them |
 | `src/sandbox.ts` | SSH to Gwen's own Linux machine |
 | `src/research.ts` | Background research jobs |
 | `src/transcript.ts` | The permanent chat record that `search_history` reads |
@@ -44,6 +45,41 @@ released and claimed by someone else. She answers that person in a private
 chat only. Adapters can run together (`GWEN_ADAPTERS=buzz,telegram`); each
 conversation keeps its own history, and her memory is shared across all of
 them. No secret belongs in this repository.
+
+## Skills
+
+A skill is a written procedure for one kind of job, kept out of the system
+prompt. Set `GWEN_SKILLS_DIR` to a directory of markdown files, one skill per
+file:
+
+```markdown
+---
+name: github
+description: Read and change issues and pull requests on GitHub.
+mcp: github http://github-mcp-server.ai.svc.cluster.local:8080/mcp bearer=GITHUB_MCP_TOKEN
+---
+The procedure, in markdown.
+```
+
+Only each skill's name and description are added to her instructions, one line
+per skill. She reads the body with `load_skill` in a turn that needs it, so a
+long procedure costs tokens only when it is used. Files are read once at
+start. A file that is not a valid skill is logged (`skill skipped`) and left
+out; the rest still load.
+
+A skill can name MCP servers with `mcp:` lines (repeatable): a name for the
+server, its streamable-HTTP address, and optionally `bearer=<ENV VAR>` to send
+that variable's value as a bearer token and `tools=a,b` to offer only those
+tools. No MCP tool is defined to the model up front. When the skill loads, the
+service connects to its servers and returns their tools' names, descriptions
+and argument schemas as part of the `load_skill` result; she then calls one
+with `skill_tool(server, tool, arguments)`, which checks the arguments against
+the schema first. The tool list of a run is fixed when the run starts, which
+is why MCP tools go through this one tool instead of being added one by one.
+A tool result longer than 12,000 characters is cut in the middle.
+
+Log lines `load_skill` and `skill_tool` record which skill and which tool were
+used and how long a call took, never arguments or results.
 
 ## Chat history
 

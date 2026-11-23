@@ -4,11 +4,13 @@ import type { Config } from './config.js';
 import { RecentLines, frameJobResult, frameMessage } from './frame.js';
 import { routeMessage } from './jev.js';
 import { log, errText } from './log.js';
+import { McpHub } from './mcp.js';
 import { Hindsight } from './memory.js';
 import { createClient, finish, maxSteps, modelFields } from './openrouter.js';
 import { KeyedQueue } from './queue.js';
 import { Research } from './research.js';
 import { Sandbox } from './sandbox.js';
+import { loadSkills, skillIndex } from './skills.js';
 import { Store, type Job } from './store.js';
 import { Transcript } from './transcript.js';
 import { historyTools } from './tools/history.js';
@@ -16,6 +18,7 @@ import { libraryTools } from './tools/library.js';
 import { memoryTools } from './tools/memory.js';
 import { researchTools } from './tools/research.js';
 import { sandboxTools } from './tools/sandbox.js';
+import { skillTools } from './tools/skills.js';
 import { webTools } from './tools/web.js';
 
 // The core. One front-model turn per incoming message:
@@ -50,6 +53,11 @@ export class Gwen {
   private web: ReturnType<typeof webTools>;
   /** Empty when no sandbox is configured. */
   private sandbox: ReturnType<typeof sandboxTools> | readonly [];
+  /** Empty when there are no skills. */
+  private skills: ReturnType<typeof skillTools>;
+  private mcp: McpHub;
+  /** The persona, followed by the list of skills when there are any. */
+  private instructions: string;
   private adapters = new Map<string, ChatAdapter>();
   private recent = new RecentLines();
   private turns = new KeyedQueue((conversationId, e) =>
@@ -65,6 +73,11 @@ export class Gwen {
     this.memory = new Hindsight(cfg.memory);
     this.web = webTools(cfg.web);
     this.sandbox = cfg.sandbox ? sandboxTools(new Sandbox(cfg.sandbox)) : [];
+    const skills = loadSkills(cfg.skillsDir);
+    this.mcp = new McpHub([...skills.values()].flatMap((skill) => skill.mcp));
+    this.skills = skillTools(skills, this.mcp);
+    this.instructions = [cfg.persona, skillIndex(skills)].filter(Boolean).join('\n\n');
+    log.info('skills loaded', { skills: [...skills.keys()], mcpServers: this.mcp.servers });
     const researchClient = createClient(cfg.openrouterKey, cfg.research);
     this.research = new Research(cfg.research, researchClient, this.store, this.web, this.memory, (job) =>
       this.deliver(job),
@@ -97,6 +110,11 @@ export class Gwen {
       await this.research.idle();
       await this.turns.drain();
     }
+  }
+
+  /** Close what the service holds open besides the adapters. */
+  async stop(): Promise<void> {
+    await this.mcp.close();
   }
 
   /** Answer a message from a person. */
@@ -160,7 +178,7 @@ export class Gwen {
     try {
       const run = callModel(this.client, {
         ...modelFields(this.cfg.front, 'throughput'),
-        instructions: this.cfg.persona,
+        instructions: this.instructions,
         input,
         tools: this.tools(target, asOf),
         state: this.store.state(target.conversationId),
@@ -210,6 +228,7 @@ export class Gwen {
     return [
       ...this.web,
       ...this.sandbox,
+      ...this.skills,
       ...researchTools(this.research, target),
       ...memoryTools(this.memory, this.cfg.ownerName, target.conversationId),
       ...historyTools(this.transcript, {

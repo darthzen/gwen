@@ -91,6 +91,8 @@ export interface Config {
   /** Present only when GWEN_SANDBOX_HOST is set. */
   sandbox: SandboxConfig | null;
   dataDir: string;
+  /** Directory of skill files (see src/skills.ts). Empty means no skills. */
+  skillsDir: string;
   persona: string;
   ownerName: string;
   /** IANA zone the owner lives in. Dates in search_history are read and shown in it. */
@@ -193,6 +195,7 @@ export function loadConfig(): Config {
         }
       : null,
     dataDir: text('GWEN_DATA_DIR', './data'),
+    skillsDir: text('GWEN_SKILLS_DIR', ''),
     // No default: the persona lives outside this repo. See persona/README.txt.
     persona: readFileSync(text('GWEN_PERSONA_FILE'), 'utf8').trim(),
     ownerName: text('GWEN_OWNER_NAME', 'Rick'),
