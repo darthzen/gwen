@@ -20,6 +20,8 @@ import { researchTools } from './tools/research.js';
 import { sandboxTools } from './tools/sandbox.js';
 import { skillTools } from './tools/skills.js';
 import { webTools } from './tools/web.js';
+import { ScheduleStore, Scheduler, type Schedule } from './schedule.js';
+import { scheduleTools } from './tools/schedule.js';
 
 // The core. One front-model turn per incoming message:
 //
@@ -63,6 +65,7 @@ export class Gwen {
   private turns = new KeyedQueue((conversationId, e) =>
     log.error('turn crashed', { conversationId, error: errText(e) }),
   );
+  private schedule: Scheduler;
 
   constructor(private cfg: Config) {
     this.client = createClient(cfg.openrouterKey, cfg.front);
@@ -82,6 +85,12 @@ export class Gwen {
     this.research = new Research(cfg.research, researchClient, this.store, this.web, this.memory, (job) =>
       this.deliver(job),
     );
+    this.schedule = new Scheduler(
+      new ScheduleStore(cfg.dataDir),
+      cfg.timeZone,
+      5 * 60 * 1000,
+      (entry) => this.deliverScheduled(entry),
+    );
   }
 
   register(adapter: ChatAdapter): void {
@@ -91,6 +100,7 @@ export class Gwen {
   /** Run once at boot, after the adapters are registered. */
   recover(): void {
     for (const job of this.research.recover()) this.deliver(job);
+    this.schedule.start();
   }
 
   onMessage(adapter: ChatAdapter, message: Incoming): void {
@@ -114,6 +124,7 @@ export class Gwen {
 
   /** Close what the service holds open besides the adapters. */
   async stop(): Promise<void> {
+    this.schedule.stop();
     await this.mcp.close();
   }
 
@@ -153,6 +164,27 @@ export class Gwen {
     this.turns.push(job.conversationId, async () => {
       const sent = await this.respond(job, frameJobResult(job, this.cfg.ownerName), new Date(), { kind: 'job-result', job: job.id });
       if (sent) this.research.markDelivered(job);
+    });
+  }
+
+  /** Fire a scheduled task: queue a normal turn with the stored target. */
+  deliverScheduled(entry: Schedule): void {
+    if (!this.adapters.has(entry.target.adapter)) {
+      log.info('schedule skipped: adapter not active', {
+        id: entry.id,
+        name: entry.name,
+        adapter: entry.target.adapter,
+      });
+      return;
+    }
+    const localTime = new Date().toLocaleString('en-US', {
+      timeZone: this.cfg.timeZone,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+    const input = `[Scheduled task ${entry.name}, fired ${localTime}] ${entry.prompt}`;
+    this.turns.push(entry.target.conversationId, async () => {
+      await this.respond(entry.target, input, new Date(), { kind: 'schedule', id: entry.id, name: entry.name });
     });
   }
 
@@ -238,6 +270,7 @@ export class Gwen {
         asOf,
       }),
       ...(this.memory.enabled ? libraryTools(this.memory) : []),
+      ...scheduleTools(this.schedule, target),
     ] as const;
   }
 }
