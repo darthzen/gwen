@@ -123,6 +123,13 @@ do the same for the research worker. To go back to OpenRouter, remove the
 preset again. `OPENROUTER_API_KEY` stays required either way: Jev routing
 always goes through OpenRouter.
 
+Reasoning effort is `GWEN_FRONT_EFFORT` and `GWEN_RESEARCH_EFFORT` (`none`,
+`minimal`, `low`, `medium`, `high`, `xhigh`, `max`). A value sent in a request
+wins over a preset's own reasoning setting, so for a model named as a
+`@preset/...` nothing is sent unless the variable is set, and the preset
+decides. A model named any other way defaults to `none` (front) or `low`
+(research). Some models refuse `none`.
+
 `src/local.ts` is the whole of the difference: llama-server's Responses API
 omits fields the Agent SDK requires, and that file fills them in.
 

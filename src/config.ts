@@ -14,7 +14,12 @@ export type MemoryScope = (typeof MEMORY_SCOPES)[number];
 export interface ModelConfig {
   /** A model slug, or `@preset/<name>` to take routing rules from the OpenRouter dashboard. */
   model: string;
-  effort: Effort;
+  /**
+   * Reasoning effort sent with every request. Undefined sends none, which
+   * leaves reasoning to the preset: a value in the request wins over the
+   * preset's own, so a preset can only manage it when nothing is sent.
+   */
+  effort?: Effort;
   /** Upper bound on model rounds in one run. */
   maxSteps: number;
   /**
@@ -129,6 +134,16 @@ function oneOf<T extends string>(name: string, allowed: readonly T[], fallback: 
   throw new Error(`${name} must be one of ${allowed.join(', ')}; got ${JSON.stringify(value)}`);
 }
 
+/**
+ * A model's reasoning effort. A model named as a preset sends none unless the
+ * variable is set, so the preset's reasoning setting applies; any other model
+ * gets the fallback.
+ */
+function effortFor(name: string, model: string, fallback: Effort): Effort | undefined {
+  if (model.startsWith('@preset/') && !process.env[name]?.trim()) return undefined;
+  return oneOf(name, EFFORTS, fallback);
+}
+
 function list(name: string, fallback: string): string[] {
   return text(name, fallback).split(',').map((item) => item.trim()).filter(Boolean);
 }
@@ -146,19 +161,21 @@ function timeZone(name: string, fallback: string): string {
 export function loadConfig(): Config {
   const adapters = list('GWEN_ADAPTERS', 'cli');
   const sandboxHost = text('GWEN_SANDBOX_HOST', '');
+  const frontModel = text('GWEN_FRONT_MODEL', '@preset/gwen-front');
+  const researchModel = text('GWEN_RESEARCH_MODEL', 'google/gemini-4-hydrogen');
   return {
     openrouterKey: text('OPENROUTER_API_KEY'),
     front: {
-      model: text('GWEN_FRONT_MODEL', '@preset/gwen-front'),
-      effort: oneOf('GWEN_FRONT_EFFORT', EFFORTS, 'none'),
+      model: frontModel,
+      effort: effortFor('GWEN_FRONT_EFFORT', frontModel, 'none'),
       maxSteps: number('GWEN_FRONT_MAX_STEPS', 8),
       baseUrl: text('GWEN_FRONT_BASE_URL', ''),
       apiKey: text('GWEN_FRONT_API_KEY', ''),
       temperature: optionalNumber('GWEN_FRONT_TEMPERATURE'),
     },
     research: {
-      model: text('GWEN_RESEARCH_MODEL', 'google/gemini-4-hydrogen'),
-      effort: oneOf('GWEN_RESEARCH_EFFORT', EFFORTS, 'low'),
+      model: researchModel,
+      effort: effortFor('GWEN_RESEARCH_EFFORT', researchModel, 'low'),
       maxSteps: number('GWEN_RESEARCH_MAX_STEPS', 24),
       baseUrl: text('GWEN_RESEARCH_BASE_URL', ''),
       apiKey: text('GWEN_RESEARCH_API_KEY', ''),

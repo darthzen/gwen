@@ -40,13 +40,14 @@ type ProviderSort = 'throughput' | 'price' | 'latency';
  * A preset carries its own routing rules from the dashboard, so it gets no
  * provider block; so does a self-hosted model, which has no providers to
  * route between and keeps its prompts on our own hardware. Every other model
- * gets the ZDR policy.
+ * gets the ZDR policy. No effort configured means no reasoning field, so a
+ * preset's own reasoning setting is the one that applies.
  */
 export function modelFields(cfg: ModelConfig, sort?: ProviderSort) {
   const routed = !cfg.baseUrl && !cfg.model.startsWith('@preset/');
   return {
     model: cfg.model,
-    reasoning: { effort: cfg.effort },
+    ...(cfg.effort === undefined ? {} : { reasoning: { effort: cfg.effort } }),
     ...(cfg.temperature === undefined ? {} : { temperature: cfg.temperature }),
     ...(routed ? { provider: { ...ZDR_POLICY, ...(sort ? { sort } : {}) } } : {}),
   };
