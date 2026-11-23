@@ -31,9 +31,19 @@ function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)} […${text.length - max} more characters]` : text;
 }
 
+/** Elapsed time in plain numbers, computed here because `when` is local and the model's clock is UTC. */
+export function ago(ms: number): string {
+  const minutes = Math.max(0, Math.round(ms / 60_000));
+  if (minutes < 1) return 'under a minute ago';
+  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 48 * 60) return `${Math.floor(minutes / 60)} h ${minutes % 60} min ago`;
+  return `${Math.round(minutes / 1440)} days ago`;
+}
+
 export function historyTools(transcript: Transcript, scope: HistoryScope) {
   const show = (e: Entry, max: number) => ({
     when: localTime(e.t, scope.timeZone),
+    ago: ago(scope.asOf.getTime() - Date.parse(e.t)),
     platform: e.adapter,
     speaker: e.speaker,
     text: clip(e.text, max),
@@ -41,7 +51,7 @@ export function historyTools(transcript: Transcript, scope: HistoryScope) {
 
   const searchHistory = tool({
     name: 'search_history',
-    description: `Search the full record of your conversations with ${scope.ownerName}, on every platform (${scope.platforms.join(', ')}), from before the current message. Your own history holds only recent turns of this one conversation; use this for anything older or said elsewhere, and before saying you do not remember a conversation. query: words that must all appear in one message, any order, any case; it is a literal word match, so use the few most distinctive words and retry with a synonym when nothing comes back. from/to: calendar days (YYYY-MM-DD, ${scope.timeZone}), inclusive; give dates with no query to read what was said in that period. Returns matching messages newest first, each with the lines around it. Quote and date what you find; when nothing matches, say the record has no match for those words, which is not the same as it never having been said.`,
+    description: `Search the full record of your conversations with ${scope.ownerName}, on every platform (${scope.platforms.join(', ')}), from before the current message. Your own history holds only recent turns of this one conversation; use this for anything older or said elsewhere, and before saying you do not remember a conversation. query: words that must all appear in one message, any order, any case; it is a literal word match, so use the few most distinctive words and retry with a synonym when nothing comes back. from/to: calendar days (YYYY-MM-DD, ${scope.timeZone}), inclusive; give dates with no query to read what was said in that period. Returns matching messages newest first, each with the lines around it; \"when\" is local time and \"ago\" is how long before the current message, so take elapsed time from \"ago\" and never compute it yourself. Quote and date what you find; when nothing matches, say the record has no match for those words, which is not the same as it never having been said.`,
     inputSchema: z.object({
       query: z.string().optional(),
       from: day.optional(),

@@ -4,7 +4,7 @@ import { mkdtempSync, readdirSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Transcript, dayStart, entriesFromState, localTime, type Entry } from '../src/transcript.js';
-import { historyTools } from '../src/tools/history.js';
+import { ago, historyTools } from '../src/tools/history.js';
 
 const dir = () => mkdtempSync(join(tmpdir(), 'gwen-transcript-'));
 const line = (t: string, conversation: string, speaker: string, text: string): Entry => ({
@@ -135,6 +135,8 @@ test('search_history: local dates in and out, and nothing from the current turn 
   assert.equal(found.matches, 2);
   assert.equal(found.passages[0][0].when, '2026-11-01 21:00 CST');
   assert.equal(found.passages[0][0].platform, 'telegram');
+  assert.equal(found.passages[0][0].ago, '19 days ago');
+  assert.deepEqual([20_000, 19 * 60_000, 26 * 3_600_000 + 5 * 60_000].map(ago), ['under a minute ago', '19 min ago', '26 h 5 min ago']);
 
   // 03:00Z on the 2nd is the evening of the 1st in Chicago.
   assert.equal((await run({ query: 'dentist', from: '2026-11-01', to: '2026-11-01' })).matches, 2);
