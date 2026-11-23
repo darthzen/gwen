@@ -54,12 +54,13 @@ export class Gwen {
   );
 
   constructor(private cfg: Config) {
-    this.client = createClient(cfg.openrouterKey);
+    this.client = createClient(cfg.openrouterKey, cfg.front);
     this.store = new Store(cfg.dataDir);
     this.memory = new Hindsight(cfg.memory);
     this.web = webTools(cfg.web);
     this.sandbox = cfg.sandbox ? sandboxTools(new Sandbox(cfg.sandbox)) : [];
-    this.research = new Research(cfg.research, this.client, this.store, this.web, this.memory, (job) =>
+    const researchClient = createClient(cfg.openrouterKey, cfg.research);
+    this.research = new Research(cfg.research, researchClient, this.store, this.web, this.memory, (job) =>
       this.deliver(job),
     );
   }

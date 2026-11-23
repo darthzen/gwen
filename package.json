@@ -1,6 +1,6 @@
 {
   "name": "gwen",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Gwen, a concierge agent on the OpenRouter Agent SDK with pluggable chat adapters",
   "type": "module",
   "private": true,
@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@openrouter/agent": "1.2.2",
+    "@openrouter/sdk": "1.5.128",
     "nostr-tools": "^2.10.0",
     "ssh2": "1.17.0",
     "ws": "^8.18.0",

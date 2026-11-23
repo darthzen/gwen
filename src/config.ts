@@ -17,6 +17,16 @@ export interface ModelConfig {
   effort: Effort;
   /** Upper bound on model rounds in one run. */
   maxSteps: number;
+  /**
+   * Where the model is served. Empty means OpenRouter. Set to the `/v1` address
+   * of a self-hosted llama-server to run this model there instead; `model` is
+   * then that server's model name.
+   */
+  baseUrl: string;
+  /** Sent to a self-hosted server that wants a key. Unused on OpenRouter. */
+  apiKey: string;
+  /** Sampling temperature. Unset leaves it to the model, preset or server. */
+  temperature?: number;
 }
 
 export interface ResearchConfig extends ModelConfig {
@@ -96,6 +106,10 @@ function number(name: string, fallback: number): number {
   return value;
 }
 
+function optionalNumber(name: string): number | undefined {
+  return text(name, '') === '' ? undefined : number(name, 0);
+}
+
 function oneOf<T extends string>(name: string, allowed: readonly T[], fallback: T): T {
   const value = text(name, fallback);
   if ((allowed as readonly string[]).includes(value)) return value as T;
@@ -115,11 +129,17 @@ export function loadConfig(): Config {
       model: text('GWEN_FRONT_MODEL', '@preset/gwen-front'),
       effort: oneOf('GWEN_FRONT_EFFORT', EFFORTS, 'none'),
       maxSteps: number('GWEN_FRONT_MAX_STEPS', 8),
+      baseUrl: text('GWEN_FRONT_BASE_URL', ''),
+      apiKey: text('GWEN_FRONT_API_KEY', ''),
+      temperature: optionalNumber('GWEN_FRONT_TEMPERATURE'),
     },
     research: {
       model: text('GWEN_RESEARCH_MODEL', 'google/gemini-4-hydrogen'),
       effort: oneOf('GWEN_RESEARCH_EFFORT', EFFORTS, 'low'),
       maxSteps: number('GWEN_RESEARCH_MAX_STEPS', 24),
+      baseUrl: text('GWEN_RESEARCH_BASE_URL', ''),
+      apiKey: text('GWEN_RESEARCH_API_KEY', ''),
+      temperature: optionalNumber('GWEN_RESEARCH_TEMPERATURE'),
       timeoutMs: number('GWEN_RESEARCH_TIMEOUT_MS', 10 * 60_000),
       maxCostUsd: number('GWEN_RESEARCH_MAX_COST_USD', 0.75),
     },

@@ -38,6 +38,27 @@ tool, a shell on her own machine over SSH; without a host she has no such tool. 
 adapter needs `GWEN_ADAPTERS=buzz`, `BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY` and
 `BUZZ_OWNER_PUBKEY`. No secret belongs in this repository.
 
+## Where the models run
+
+Every model goes to OpenRouter unless told otherwise. The front model, the
+research worker, or both can instead run on a self-hosted llama.cpp
+`llama-server`:
+
+```sh
+GWEN_FRONT_BASE_URL=http://llama-server.ai.svc.cluster.local:8080/v1
+GWEN_FRONT_MODEL=qwen3.8-27b-uncensored   # the server's model name
+GWEN_FRONT_TEMPERATURE=0.8                # optional; unset leaves the server's default
+```
+
+`GWEN_RESEARCH_BASE_URL`, `GWEN_RESEARCH_MODEL` and `GWEN_RESEARCH_TEMPERATURE`
+do the same for the research worker. To go back to OpenRouter, remove the
+`*_BASE_URL` and `*_TEMPERATURE` settings and name an OpenRouter model or
+preset again. `OPENROUTER_API_KEY` stays required either way: Jev routing
+always goes through OpenRouter.
+
+`src/local.ts` is the whole of the difference: llama-server's Responses API
+omits fields the Agent SDK requires, and that file fills them in.
+
 ## Adding a chat platform
 
 Implement `ChatAdapter` from `src/adapters/types.ts` and add one entry to

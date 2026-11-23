@@ -30,6 +30,7 @@ async function main(): Promise<void> {
   log.info('gwen started', {
     adapters: adapters.map((a) => a.name),
     frontModel: cfg.front.model,
+    frontServedBy: cfg.front.baseUrl || 'openrouter',
     researchModel: cfg.research.model,
     memory: cfg.memory.key !== '',
     sandbox: cfg.sandbox?.host ?? null,

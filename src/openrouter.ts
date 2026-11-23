@@ -1,17 +1,32 @@
 import { OpenRouter } from '@openrouter/agent';
 import type { ModelConfig } from './config.js';
+import { localHttpClient } from './local.js';
 
 // Everything about how Gwen calls OpenRouter that more than one caller needs:
 // the client, the data-handling policy, and how a finished run is read.
 
 export const OPENROUTER_API = 'https://openrouter.ai/api';
 
-export function createClient(apiKey: string): OpenRouter {
+const TIMEOUT_MS = 90_000;
+
+/**
+ * The client for one model. A model with a `baseUrl` is served from that
+ * address (a self-hosted llama-server); every other model goes to OpenRouter.
+ */
+export function createClient(apiKey: string, cfg: ModelConfig): OpenRouter {
+  if (cfg.baseUrl) {
+    return new OpenRouter({
+      apiKey: cfg.apiKey || 'local',
+      serverURL: cfg.baseUrl,
+      httpClient: localHttpClient(),
+      timeoutMs: TIMEOUT_MS,
+    });
+  }
   return new OpenRouter({
     apiKey,
     httpReferer: 'https://github.com/darthzen/gwen',
     appTitle: 'Gwen',
-    timeoutMs: 90_000,
+    timeoutMs: TIMEOUT_MS,
   });
 }
 
@@ -23,14 +38,17 @@ type ProviderSort = 'throughput' | 'price' | 'latency';
 /**
  * The model, provider routing and reasoning fields of a callModel request.
  * A preset carries its own routing rules from the dashboard, so it gets no
- * provider block; every other model gets the ZDR policy.
+ * provider block; so does a self-hosted model, which has no providers to
+ * route between and keeps its prompts on our own hardware. Every other model
+ * gets the ZDR policy.
  */
 export function modelFields(cfg: ModelConfig, sort?: ProviderSort) {
-  const isPreset = cfg.model.startsWith('@preset/');
+  const routed = !cfg.baseUrl && !cfg.model.startsWith('@preset/');
   return {
     model: cfg.model,
     reasoning: { effort: cfg.effort },
-    ...(isPreset ? {} : { provider: { ...ZDR_POLICY, ...(sort ? { sort } : {}) } }),
+    ...(cfg.temperature === undefined ? {} : { temperature: cfg.temperature }),
+    ...(routed ? { provider: { ...ZDR_POLICY, ...(sort ? { sort } : {}) } } : {}),
   };
 }
 
