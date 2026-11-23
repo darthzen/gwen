@@ -93,6 +93,8 @@ export interface Config {
   dataDir: string;
   persona: string;
   ownerName: string;
+  /** IANA zone the owner lives in. Dates in search_history are read and shown in it. */
+  timeZone: string;
   adapters: string[];
   /** Present only when the buzz adapter is enabled. */
   buzz: BuzzConfig | null;
@@ -127,6 +129,16 @@ function oneOf<T extends string>(name: string, allowed: readonly T[], fallback: 
 
 function list(name: string, fallback: string): string[] {
   return text(name, fallback).split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function timeZone(name: string, fallback: string): string {
+  const value = text(name, fallback);
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value });
+  } catch {
+    throw new Error(`${name} must be an IANA time zone such as America/Chicago; got ${JSON.stringify(value)}`);
+  }
+  return value;
 }
 
 export function loadConfig(): Config {
@@ -184,6 +196,7 @@ export function loadConfig(): Config {
     // No default: the persona lives outside this repo. See persona/README.txt.
     persona: readFileSync(text('GWEN_PERSONA_FILE'), 'utf8').trim(),
     ownerName: text('GWEN_OWNER_NAME', 'Rick'),
+    timeZone: timeZone('GWEN_TIMEZONE', 'UTC'),
     adapters,
     buzz: adapters.includes('buzz')
       ? {

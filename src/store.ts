@@ -79,6 +79,19 @@ export class Store {
     };
   }
 
+  /** Every stored conversation as parsed JSON, unreadable files skipped. For the transcript backfill. */
+  rawConversations(): unknown[] {
+    return readdirSync(this.convDir)
+      .filter((f) => f.endsWith('.json'))
+      .flatMap((f) => {
+        try {
+          return [JSON.parse(readFileSync(join(this.convDir, f), 'utf8')) as unknown];
+        } catch {
+          return [];
+        }
+      });
+  }
+
   saveJob(job: Job): void {
     writeAtomic(join(this.jobDir, `${safe(job.id)}.json`), JSON.stringify(job, null, 2));
   }

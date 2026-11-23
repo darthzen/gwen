@@ -10,6 +10,8 @@ import { KeyedQueue } from './queue.js';
 import { Research } from './research.js';
 import { Sandbox } from './sandbox.js';
 import { Store, type Job } from './store.js';
+import { Transcript } from './transcript.js';
+import { historyTools } from './tools/history.js';
 import { libraryTools } from './tools/library.js';
 import { memoryTools } from './tools/memory.js';
 import { researchTools } from './tools/research.js';
@@ -42,6 +44,7 @@ type TurnRecord = Record<string, unknown>;
 export class Gwen {
   private client: OpenRouter;
   private store: Store;
+  private transcript: Transcript;
   private memory: Hindsight;
   private research: Research;
   private web: ReturnType<typeof webTools>;
@@ -56,6 +59,9 @@ export class Gwen {
   constructor(private cfg: Config) {
     this.client = createClient(cfg.openrouterKey, cfg.front);
     this.store = new Store(cfg.dataDir);
+    this.transcript = new Transcript(cfg.dataDir);
+    const backfilled = this.transcript.backfill(this.store.rawConversations());
+    if (backfilled) log.info('transcript backfilled from conversation state', { lines: backfilled });
     this.memory = new Hindsight(cfg.memory);
     this.web = webTools(cfg.web);
     this.sandbox = cfg.sandbox ? sandboxTools(new Sandbox(cfg.sandbox)) : [];
@@ -96,6 +102,7 @@ export class Gwen {
   /** Answer a message from a person. */
   private async answer(target: ReplyTarget, message: Incoming): Promise<void> {
     const started = Date.now();
+    this.record(target, message.senderName, message.text, new Date(started));
     const [prefetch, routing] = await Promise.all([
       this.memory.prefetch(message.text),
       routeMessage(this.cfg.jev, this.cfg.openrouterKey, message.text, this.recent.text(target.conversationId)),
@@ -109,7 +116,7 @@ export class Gwen {
       routing,
       now: new Date(),
     });
-    await this.respond(target, input, {
+    await this.respond(target, input, new Date(started), {
       kind: 'message',
       prepMs: Date.now() - started,
       recallMs: prefetch.ms,
@@ -126,7 +133,7 @@ export class Gwen {
   /** Hand a settled research job to the front model to relay. */
   private deliver(job: Job): void {
     this.turns.push(job.conversationId, async () => {
-      const sent = await this.respond(job, frameJobResult(job, this.cfg.ownerName), { kind: 'job-result', job: job.id });
+      const sent = await this.respond(job, frameJobResult(job, this.cfg.ownerName), new Date(), { kind: 'job-result', job: job.id });
       if (sent) this.research.markDelivered(job);
     });
   }
@@ -134,8 +141,9 @@ export class Gwen {
   /**
    * Run the front model on `input` and post its reply. Never throws: a failure
    * is reported to the user and logged. Returns whether a message was posted.
+   * `asOf` is when the turn began: search_history sees nothing later.
    */
-  private async respond(target: ReplyTarget, input: string, record: TurnRecord): Promise<boolean> {
+  private async respond(target: ReplyTarget, input: string, asOf: Date, record: TurnRecord): Promise<boolean> {
     const started = Date.now();
     record.conversationId = target.conversationId;
     const adapter = this.adapters.get(target.adapter);
@@ -143,7 +151,10 @@ export class Gwen {
       log.error('turn has no adapter to reply through', { ...record, adapter: target.adapter });
       return false;
     }
-    const send = (text: string) => adapter.send(target.conversationId, text, target.replyRef);
+    const send = async (text: string): Promise<void> => {
+      await adapter.send(target.conversationId, text, target.replyRef);
+      this.record(target, 'Gwen', text, new Date());
+    };
     const stopTyping = adapter.typing(target.conversationId, target.replyRef);
     let sent = false;
     try {
@@ -151,7 +162,7 @@ export class Gwen {
         ...modelFields(this.cfg.front, 'throughput'),
         instructions: this.cfg.persona,
         input,
-        tools: this.tools(target),
+        tools: this.tools(target, asOf),
         state: this.store.state(target.conversationId),
         stopWhen: maxSteps(this.cfg.front.maxSteps),
         maxOutputTokens: MAX_REPLY_TOKENS,
@@ -184,12 +195,29 @@ export class Gwen {
     return sent;
   }
 
-  private tools(target: ReplyTarget) {
+  /** Add a line to the permanent transcript: something a person said, or something Gwen sent. */
+  private record(target: ReplyTarget, speaker: string, text: string, at: Date): void {
+    this.transcript.append({
+      t: at.toISOString(),
+      adapter: target.adapter,
+      conversation: target.conversationId,
+      speaker,
+      text,
+    });
+  }
+
+  private tools(target: ReplyTarget, asOf: Date) {
     return [
       ...this.web,
       ...this.sandbox,
       ...researchTools(this.research, target),
       ...memoryTools(this.memory, this.cfg.ownerName, target.conversationId),
+      ...historyTools(this.transcript, {
+        ownerName: this.cfg.ownerName,
+        timeZone: this.cfg.timeZone,
+        platforms: this.cfg.adapters,
+        asOf,
+      }),
       ...(this.memory.enabled ? libraryTools(this.memory) : []),
     ] as const;
   }
