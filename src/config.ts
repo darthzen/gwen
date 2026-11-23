@@ -1,5 +1,4 @@
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 
 // All configuration comes from the environment and is read once, here. Every
 // setting has its name, default and validation on one line of loadConfig.
@@ -92,8 +91,6 @@ function list(name: string, fallback: string): string[] {
   return text(name, fallback).split(',').map((item) => item.trim()).filter(Boolean);
 }
 
-const DEFAULT_PERSONA_FILE = fileURLToPath(new URL('../persona/SOUL.md', import.meta.url));
-
 export function loadConfig(): Config {
   const adapters = list('GWEN_ADAPTERS', 'cli');
   return {
@@ -129,7 +126,8 @@ export function loadConfig(): Config {
       firecrawlUrl: text('FIRECRAWL_URL', 'http://api.firecrawl.svc.cluster.local:3002'),
     },
     dataDir: text('GWEN_DATA_DIR', './data'),
-    persona: readFileSync(text('GWEN_PERSONA_FILE', DEFAULT_PERSONA_FILE), 'utf8').trim(),
+    // No default: the persona lives outside this repo. See persona/README.txt.
+    persona: readFileSync(text('GWEN_PERSONA_FILE'), 'utf8').trim(),
     ownerName: text('GWEN_OWNER_NAME', 'Rick'),
     adapters,
     buzz: adapters.includes('buzz')

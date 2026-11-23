@@ -15,7 +15,6 @@ ENV NODE_ENV=production \
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
-COPY persona ./persona
 # Numeric so Kubernetes can verify runAsNonRoot.
 USER 1000:1000
 CMD ["node", "dist/main.js"]

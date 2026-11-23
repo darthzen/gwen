@@ -20,13 +20,14 @@ a background job and its report arrives later as a message of its own.
 | `src/http.ts` | The one JSON-over-HTTP helper every client uses |
 | `src/adapters/` | Chat platforms. `types.ts` is the boundary; the core knows nothing platform-specific |
 | `src/config.ts` | Every setting, its environment variable and default |
-| `persona/SOUL.md` | The system prompt |
+| `persona/README.txt` | Where the system prompt lives (outside this repo) and how to edit it |
 
 ## Run it locally
 
 ```sh
 npm install
-OPENROUTER_API_KEY=... GWEN_ADAPTERS=cli npm run dev   # type a message, press return
+GWEN_PERSONA_FILE=~/Developer/lab-fleet/17-buzz/gwen/SOUL.md \
+  OPENROUTER_API_KEY=... GWEN_ADAPTERS=cli npm run dev   # type a message, press return
 npm test
 ```
 
