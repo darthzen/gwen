@@ -14,11 +14,11 @@ import { log, errText } from './log.js';
 // data has to be readable with `cat` when something goes wrong. Writes go to a
 // temp file and are renamed into place so a crash never leaves half a file.
 
-function safe(id: string): string {
+export function safe(id: string): string {
   return id.replace(/[^A-Za-z0-9_.-]/g, '_');
 }
 
-function writeAtomic(path: string, body: string): void {
+export function writeAtomic(path: string, body: string): void {
   const tmp = `${path}.tmp`;
   writeFileSync(tmp, body);
   renameSync(tmp, path);

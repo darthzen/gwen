@@ -133,6 +133,26 @@ decides. A model named any other way defaults to `none` (front) or `low`
 `src/local.ts` is the whole of the difference: llama-server's Responses API
 omits fields the Agent SDK requires, and that file fills them in.
 
+## Scheduling
+
+Gwen can schedule tasks that fire on a cron schedule and send a prompt to a
+conversation. The front model uses the `schedule_create`, `schedule_list`
+and `schedule_delete` tools; the cron is interpreted in `GWEN_TIMEZONE`
+(default `America/Chicago`).
+
+- Minimum interval between fires is 5 minutes. A cron that fires more often
+  is rejected at creation time with a clear error.
+- Entries are stored as one JSON file each under
+  `$GWEN_DATA_DIR/schedules/`. A corrupt file is skipped at boot with a
+  warning; it does not crash the service.
+- If the service was down when a scheduled fire was due, the missed run is
+  logged (`schedule: missed run while down, not replayed`) but not replayed:
+  the next future slot fires normally.
+- When a scheduled task fires, the input is framed as
+  `[Scheduled task NAME, fired LOCALTIME] PROMPT` and queued as a normal
+  turn on the stored conversation. If the adapter is no longer active, the
+  fire is skipped with a log line.
+
 ## Adding a chat platform
 
 Implement `ChatAdapter` from `src/adapters/types.ts` and add one entry to

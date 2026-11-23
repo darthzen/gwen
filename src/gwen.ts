@@ -270,7 +270,7 @@ export class Gwen {
         asOf,
       }),
       ...(this.memory.enabled ? libraryTools(this.memory) : []),
-      ...scheduleTools(this.schedule, target),
+      ...scheduleTools(this.schedule, target, this.cfg.timeZone),
     ] as const;
   }
 }

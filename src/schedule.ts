@@ -1,19 +1,10 @@
-import { mkdirSync, readFileSync, writeFileSync, renameSync, existsSync, readdirSync } from 'node:fs';
+import { mkdirSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Cron } from 'croner';
 import type { ReplyTarget } from './adapters/types.js';
 import { log } from './log.js';
-
-function safe(id: string): string {
-  return id.replace(/[^A-Za-z0-9_.-]/g, '_');
-}
-
-function writeAtomic(path: string, body: string): void {
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, body);
-  renameSync(tmp, path);
-}
+import { safe, writeAtomic } from './store.js';
 
 export interface Schedule {
   id: string;
@@ -40,21 +31,30 @@ export class ScheduleStore {
 
   list(): Schedule[] {
     if (!existsSync(this.dir)) return [];
-    return readdirSync(this.dir)
-      .filter((f) => f.endsWith('.json'))
-      .map((f) => JSON.parse(readFileSync(join(this.dir, f), 'utf8')) as Schedule);
+    const out: Schedule[] = [];
+    for (const f of readdirSync(this.dir).filter((f) => f.endsWith('.json'))) {
+      try {
+        out.push(JSON.parse(readFileSync(join(this.dir, f), 'utf8')) as Schedule);
+      } catch {
+        log.warn('schedule: skipping corrupt entry file', { file: f });
+      }
+    }
+    return out;
   }
 
   get(id: string): Schedule | undefined {
     const path = join(this.dir, `${safe(id)}.json`);
     if (!existsSync(path)) return undefined;
-    return JSON.parse(readFileSync(path, 'utf8')) as Schedule;
+    try {
+      return JSON.parse(readFileSync(path, 'utf8')) as Schedule;
+    } catch {
+      log.warn('schedule: corrupt entry file', { id });
+      return undefined;
+    }
   }
 
   delete(id: string): void {
-    const path = join(this.dir, `${safe(id)}.json`);
-    if (existsSync(path)) writeFileSync(path, '');
-    renameSync(path, `${path}.deleted`);
+    rmSync(join(this.dir, `${safe(id)}.json`), { force: true });
   }
 }
 
@@ -100,7 +100,7 @@ export class Scheduler {
     this.minIntervalMs = minIntervalMs;
   }
 
-  /** Start a timer for one entry. Logs a line if the next run is already past. */
+  /** Start a timer for one entry. Logs a missed-run line if the first run after the reference is already past. */
   startEntry(entry: Schedule): void {
     const timer = new Cron(entry.cron, { timezone: this.timeZone }, () => {
       const ref = this.store.get(entry.id);
@@ -111,14 +111,13 @@ export class Scheduler {
     });
     this.timers.set(entry.id, timer);
 
-    const next = timer.nextRun();
     const reference = new Date(entry.lastRunAt ?? entry.createdAt);
-    if (next instanceof Date && next.getTime() < reference.getTime()) {
-      log.info('schedule: next run is already in the past, will fire at next future slot', {
+    const firstAfter = timer.nextRun(reference);
+    if (firstAfter instanceof Date && firstAfter.getTime() < Date.now()) {
+      log.info('schedule: missed run while down, not replayed', {
         id: entry.id,
         name: entry.name,
-        next: next.toISOString(),
-        reference: reference.toISOString(),
+        missed: firstAfter.toISOString(),
       });
     }
   }
