@@ -18,7 +18,7 @@ import { log, errText } from './log.js';
 export const ROUTES = {
   direct: {
     criteria:
-      'Answer now in one reply: conversation, a question answerable from memory or general knowledge, a request to remember something, or a fact one quick web lookup settles.',
+      'Answer now in one reply: conversation, a question answerable from memory or general knowledge, a request to remember something, a fact one quick web lookup settles, or a task a few commands on her own Linux machine settle.',
     hint: 'answer directly in this reply.',
   },
   research: {

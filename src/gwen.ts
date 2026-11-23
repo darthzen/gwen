@@ -8,9 +8,11 @@ import { Hindsight } from './memory.js';
 import { createClient, finish, maxSteps, modelFields } from './openrouter.js';
 import { KeyedQueue } from './queue.js';
 import { Research } from './research.js';
+import { Sandbox } from './sandbox.js';
 import { Store, type Job } from './store.js';
 import { memoryTools } from './tools/memory.js';
 import { researchTools } from './tools/research.js';
+import { sandboxTools } from './tools/sandbox.js';
 import { webTools } from './tools/web.js';
 
 // The core. One front-model turn per incoming message:
@@ -42,6 +44,8 @@ export class Gwen {
   private memory: Hindsight;
   private research: Research;
   private web: ReturnType<typeof webTools>;
+  /** Empty when no sandbox is configured. */
+  private sandbox: ReturnType<typeof sandboxTools> | readonly [];
   private adapters = new Map<string, ChatAdapter>();
   private recent = new RecentLines();
   private turns = new KeyedQueue((conversationId, e) =>
@@ -53,6 +57,7 @@ export class Gwen {
     this.store = new Store(cfg.dataDir);
     this.memory = new Hindsight(cfg.memory);
     this.web = webTools(cfg.web);
+    this.sandbox = cfg.sandbox ? sandboxTools(new Sandbox(cfg.sandbox)) : [];
     this.research = new Research(cfg.research, this.client, this.store, this.web, (job) => this.deliver(job));
   }
 
@@ -178,6 +183,7 @@ export class Gwen {
   private tools(target: ReplyTarget) {
     return [
       ...this.web,
+      ...this.sandbox,
       ...researchTools(this.research, target),
       ...memoryTools(this.memory, this.cfg.ownerName, target.conversationId),
     ] as const;

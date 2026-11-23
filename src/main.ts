@@ -32,6 +32,7 @@ async function main(): Promise<void> {
     frontModel: cfg.front.model,
     researchModel: cfg.research.model,
     memory: cfg.memory.key !== '',
+    sandbox: cfg.sandbox?.host ?? null,
   });
   gwen.recover();
 

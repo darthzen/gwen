@@ -45,6 +45,17 @@ export interface WebConfig {
   firecrawlUrl: string;
 }
 
+export interface SandboxConfig {
+  /** Empty disables the sandbox tool. */
+  host: string;
+  port: number;
+  user: string;
+  /** Contents of the private key file. */
+  privateKey: string;
+  /** Pinned host key as `SHA256:...`. Empty accepts any host key. */
+  hostKey: string;
+}
+
 export interface BuzzConfig {
   relayUrl: string;
   privateKey: string;
@@ -58,6 +69,8 @@ export interface Config {
   jev: JevConfig;
   memory: MemoryConfig;
   web: WebConfig;
+  /** Present only when GWEN_SANDBOX_HOST is set. */
+  sandbox: SandboxConfig | null;
   dataDir: string;
   persona: string;
   ownerName: string;
@@ -93,6 +106,7 @@ function list(name: string, fallback: string): string[] {
 
 export function loadConfig(): Config {
   const adapters = list('GWEN_ADAPTERS', 'cli');
+  const sandboxHost = text('GWEN_SANDBOX_HOST', '');
   return {
     openrouterKey: text('OPENROUTER_API_KEY'),
     front: {
@@ -125,6 +139,15 @@ export function loadConfig(): Config {
       searxngUrl: text('SEARXNG_URL', 'http://searxng.searxng.svc.cluster.local:8080'),
       firecrawlUrl: text('FIRECRAWL_URL', 'http://api.firecrawl.svc.cluster.local:3002'),
     },
+    sandbox: sandboxHost
+      ? {
+          host: sandboxHost,
+          port: number('GWEN_SANDBOX_PORT', 22),
+          user: text('GWEN_SANDBOX_USER', 'gwen'),
+          privateKey: readFileSync(text('GWEN_SANDBOX_KEY_FILE'), 'utf8'),
+          hostKey: text('GWEN_SANDBOX_HOST_KEY', ''),
+        }
+      : null,
     dataDir: text('GWEN_DATA_DIR', './data'),
     // No default: the persona lives outside this repo. See persona/README.txt.
     persona: readFileSync(text('GWEN_PERSONA_FILE'), 'utf8').trim(),

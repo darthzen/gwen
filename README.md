@@ -14,7 +14,8 @@ a background job and its report arrives later as a message of its own.
 |---|---|
 | `src/gwen.ts` | The turn loop |
 | `src/frame.ts` | Every word the model is shown about a turn (pure functions) |
-| `src/tools/` | Tools the model can call: web, memory, research |
+| `src/tools/` | Tools the model can call: web, memory, research, sandbox |
+| `src/sandbox.ts` | SSH to Gwen's own Linux machine |
 | `src/research.ts` | Background research jobs |
 | `src/memory.ts`, `src/jev.ts` | Hindsight and Jev clients |
 | `src/http.ts` | The one JSON-over-HTTP helper every client uses |
@@ -31,7 +32,9 @@ GWEN_PERSONA_FILE=~/Developer/lab-fleet/17-buzz/gwen/SOUL.md \
 npm test
 ```
 
-`HINDSIGHT_API_KEY` enables memory; without it Gwen runs without. The Buzz
+`HINDSIGHT_API_KEY` enables memory; without it Gwen runs without.
+`GWEN_SANDBOX_HOST` and `GWEN_SANDBOX_KEY_FILE` give her the `sandbox_run`
+tool, a shell on her own machine over SSH; without a host she has no such tool. The Buzz
 adapter needs `GWEN_ADAPTERS=buzz`, `BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY` and
 `BUZZ_OWNER_PUBKEY`. No secret belongs in this repository.
 
