@@ -57,3 +57,13 @@ test('recent lines keep only the newest few, per conversation', () => {
   assert.equal(recent.text('b'), 'Rick: othe');
   assert.equal(recent.text('none'), '');
 });
+
+test('a job result says where its report was filed, or that filing failed', () => {
+  const base: Job = {
+    adapter: 'cli', conversationId: 'c', id: 'r-1', question: 'q?', context: '', status: 'done',
+    createdAt: '2026-11-22T00:00:00Z', report: 'the report', delivered: false,
+  };
+  assert.doesNotMatch(frameJobResult(base, 'Rick'), /library:/);
+  assert.match(frameJobResult({ ...base, library: { filedAs: 'adhd' } }, 'Rick'), /filed under topic "adhd"/);
+  assert.match(frameJobResult({ ...base, library: { error: 'HTTP 500' } }, 'Rick'), /FAILED \(HTTP 500\)/);
+});

@@ -14,7 +14,7 @@ a background job and its report arrives later as a message of its own.
 |---|---|
 | `src/gwen.ts` | The turn loop |
 | `src/frame.ts` | Every word the model is shown about a turn (pure functions) |
-| `src/tools/` | Tools the model can call: web, memory, research, sandbox |
+| `src/tools/` | Tools the model can call: web, memory, library, research, sandbox |
 | `src/sandbox.ts` | SSH to Gwen's own Linux machine |
 | `src/research.ts` | Background research jobs |
 | `src/memory.ts`, `src/jev.ts` | Hindsight and Jev clients |

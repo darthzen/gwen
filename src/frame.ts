@@ -54,10 +54,19 @@ export function frameJobResult(job: Job, ownerName: string): string {
     `[background research result — machine-generated, not a message from ${ownerName}]`,
     `job: ${job.id}`,
     `question: ${job.question}`,
+    ...libraryLine(job),
     outcome,
     '',
     `Relay this to ${ownerName} now: bottom line first, then only what they need, keeping the source URLs for claims they may want to check. If it failed, say so in one line and offer to retry.`,
   ].join('\n');
+}
+
+/** What happened to a report that was meant for the library; nothing for an ordinary job. */
+function libraryLine(job: Job): string[] {
+  if (!job.library) return [];
+  return 'filedAs' in job.library
+    ? [`library: this report is filed under topic "${job.library.filedAs}". Say so, and save your own takeaways as the persona describes.`]
+    : [`library: filing this report FAILED (${job.library.error}). It is not in the library; say so.`];
 }
 
 /**

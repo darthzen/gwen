@@ -35,6 +35,8 @@ export interface MemoryConfig {
   key: string;
   /** The Hindsight bank behind each scope. The only place scope maps to a bank. */
   banks: Record<MemoryScope, string>;
+  /** The bank that holds reference material. Searched on request only, never before a turn. */
+  libraryBank: string;
   /** Budget for the recall that runs before every turn. */
   prefetchTimeoutMs: number;
   prefetchMaxTokens: number;
@@ -132,6 +134,7 @@ export function loadConfig(): Config {
         user: text('GWEN_USER_BANK', 'default'),
         self: text('GWEN_SELF_BANK', 'gwen'),
       },
+      libraryBank: text('GWEN_LIBRARY_BANK', 'library'),
       prefetchTimeoutMs: number('GWEN_RECALL_TIMEOUT_MS', 2500),
       prefetchMaxTokens: number('GWEN_RECALL_MAX_TOKENS', 800),
     },

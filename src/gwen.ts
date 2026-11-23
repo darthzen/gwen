@@ -10,6 +10,7 @@ import { KeyedQueue } from './queue.js';
 import { Research } from './research.js';
 import { Sandbox } from './sandbox.js';
 import { Store, type Job } from './store.js';
+import { libraryTools } from './tools/library.js';
 import { memoryTools } from './tools/memory.js';
 import { researchTools } from './tools/research.js';
 import { sandboxTools } from './tools/sandbox.js';
@@ -58,7 +59,9 @@ export class Gwen {
     this.memory = new Hindsight(cfg.memory);
     this.web = webTools(cfg.web);
     this.sandbox = cfg.sandbox ? sandboxTools(new Sandbox(cfg.sandbox)) : [];
-    this.research = new Research(cfg.research, this.client, this.store, this.web, (job) => this.deliver(job));
+    this.research = new Research(cfg.research, this.client, this.store, this.web, this.memory, (job) =>
+      this.deliver(job),
+    );
   }
 
   register(adapter: ChatAdapter): void {
@@ -186,6 +189,7 @@ export class Gwen {
       ...this.sandbox,
       ...researchTools(this.research, target),
       ...memoryTools(this.memory, this.cfg.ownerName, target.conversationId),
+      ...(this.memory.enabled ? libraryTools(this.memory) : []),
     ] as const;
   }
 }

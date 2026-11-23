@@ -37,6 +37,10 @@ export interface Job extends ReplyTarget {
   error?: string;
   delivered: boolean;
   usage?: Usage;
+  /** Set when the report is to be filed in the library under this topic. */
+  libraryTopic?: string;
+  /** How the filing went, once the job has finished: the topic tag, or the error. */
+  library?: { filedAs: string } | { error: string };
 }
 
 /** History is trimmed to this many items, cut at a user message. */

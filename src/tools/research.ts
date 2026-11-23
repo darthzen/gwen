@@ -16,10 +16,14 @@ export function researchTools(research: Research, target: ReplyTarget) {
     inputSchema: z.object({
       question: z.string().min(8).describe('Self-contained question. The worker sees nothing else.'),
       context: z.string().default('').describe('What the worker needs from this conversation and from memory.'),
+      libraryTopic: z
+        .string()
+        .default('')
+        .describe('Set this only when the research is study material to keep: the finished report is then filed in your library under this topic. Leave empty for a one-off question.'),
     }),
-    execute: async ({ question, context }) => {
-      const job = research.start(target, question, context);
-      return { jobId: job.id, status: job.status };
+    execute: async ({ question, context, libraryTopic }) => {
+      const job = research.start(target, question, context, libraryTopic.trim() || undefined);
+      return { jobId: job.id, status: job.status, ...(job.libraryTopic ? { libraryTopic: job.libraryTopic } : {}) };
     },
   });
 
