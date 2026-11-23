@@ -1,5 +1,6 @@
 import { BuzzAdapter } from './adapters/buzz/adapter.js';
 import { CliAdapter } from './adapters/cli.js';
+import { TelegramAdapter } from './adapters/telegram/adapter.js';
 import type { ChatAdapter } from './adapters/types.js';
 import { loadConfig, type Config } from './config.js';
 import { Gwen } from './gwen.js';
@@ -8,8 +9,9 @@ import { log, errText } from './log.js';
 /** Every chat platform Gwen can run on. A new platform is one entry here. */
 const ADAPTERS: Record<string, (cfg: Config) => ChatAdapter> = {
   cli: (cfg) => new CliAdapter(cfg.ownerName),
-  // loadConfig fills cfg.buzz whenever the buzz adapter is enabled.
+  // loadConfig fills cfg.buzz and cfg.telegram whenever that adapter is enabled.
   buzz: (cfg) => new BuzzAdapter(cfg.buzz!, cfg.ownerName),
+  telegram: (cfg) => new TelegramAdapter(cfg.telegram!, cfg.ownerName),
 };
 
 function createAdapter(name: string, cfg: Config): ChatAdapter {

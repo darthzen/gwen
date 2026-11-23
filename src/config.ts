@@ -74,6 +74,13 @@ export interface BuzzConfig {
   ownerPubkey: string;
 }
 
+export interface TelegramConfig {
+  /** The bot's token from @BotFather. */
+  token: string;
+  /** The one person Gwen answers: a numeric user id, or a username without the @. */
+  owner: string;
+}
+
 export interface Config {
   openrouterKey: string;
   front: ModelConfig;
@@ -89,6 +96,8 @@ export interface Config {
   adapters: string[];
   /** Present only when the buzz adapter is enabled. */
   buzz: BuzzConfig | null;
+  /** Present only when the telegram adapter is enabled. */
+  telegram: TelegramConfig | null;
 }
 
 function text(name: string, fallback?: string): string {
@@ -181,6 +190,12 @@ export function loadConfig(): Config {
           relayUrl: text('BUZZ_RELAY_URL'),
           privateKey: text('BUZZ_PRIVATE_KEY'),
           ownerPubkey: text('BUZZ_OWNER_PUBKEY').toLowerCase(),
+        }
+      : null,
+    telegram: adapters.includes('telegram')
+      ? {
+          token: text('TELEGRAM_BOT_TOKEN'),
+          owner: text('TELEGRAM_OWNER').replace(/^@/, '').toLowerCase(),
         }
       : null,
   };

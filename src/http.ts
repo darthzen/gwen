@@ -9,6 +9,11 @@ export interface JsonRequest<T> {
   /** Short name of the far end, used in error text: "hindsight", "searxng". */
   service: string;
   url: string;
+  /**
+   * Names the call in error text in place of the URL path. Required when the
+   * path carries a secret, as Telegram's does.
+   */
+  label?: string;
   /** Defaults to POST when a body is given, GET otherwise. */
   method?: 'GET' | 'POST';
   /** Sent as `Authorization: Bearer …`. */
@@ -26,7 +31,7 @@ const ERROR_DETAIL_CHARS = 300;
 
 export async function requestJson<T>(req: JsonRequest<T>): Promise<T> {
   const method = req.method ?? (req.body === undefined ? 'GET' : 'POST');
-  const what = `${req.service} ${method} ${new URL(req.url).pathname}`;
+  const what = `${req.service} ${method} ${req.label ?? new URL(req.url).pathname}`;
 
   let res: Response;
   try {

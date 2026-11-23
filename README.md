@@ -36,7 +36,13 @@ npm test
 `GWEN_SANDBOX_HOST` and `GWEN_SANDBOX_KEY_FILE` give her the `sandbox_run`
 tool, a shell on her own machine over SSH; without a host she has no such tool. The Buzz
 adapter needs `GWEN_ADAPTERS=buzz`, `BUZZ_RELAY_URL`, `BUZZ_PRIVATE_KEY` and
-`BUZZ_OWNER_PUBKEY`. No secret belongs in this repository.
+`BUZZ_OWNER_PUBKEY`. The Telegram adapter needs `GWEN_ADAPTERS=telegram`,
+`TELEGRAM_BOT_TOKEN` (from @BotFather) and `TELEGRAM_OWNER`, the one person
+she answers: a username, or better a numeric user id, since a username can be
+released and claimed by someone else. She answers that person in a private
+chat only. Adapters can run together (`GWEN_ADAPTERS=buzz,telegram`); each
+conversation keeps its own history, and her memory is shared across all of
+them. No secret belongs in this repository.
 
 ## Where the models run
 
