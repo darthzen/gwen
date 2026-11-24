@@ -50,7 +50,7 @@ export class Store {
   private convDir: string;
   private jobDir: string;
 
-  constructor(dataDir: string) {
+  constructor(private dataDir: string) {
     this.convDir = join(dataDir, 'conversations');
     this.jobDir = join(dataDir, 'jobs');
     mkdirSync(this.convDir, { recursive: true });
@@ -77,6 +77,20 @@ export class Store {
         writeAtomic(path, serializeConversationState(s));
       },
     };
+  }
+
+  /**
+   * Move a conversation's state out of the way so its next turn starts from
+   * nothing. Returns where it went, or undefined when there was none.
+   */
+  retire(conversationId: string, label: string): string | undefined {
+    const from = join(this.convDir, `${safe(conversationId)}.json`);
+    if (!existsSync(from)) return undefined;
+    const dir = join(this.dataDir, 'backup');
+    mkdirSync(dir, { recursive: true });
+    const to = join(dir, `${safe(conversationId)}.${label}.json`);
+    renameSync(from, to);
+    return to;
   }
 
   /** Every stored conversation as parsed JSON, unreadable files skipped. For the transcript backfill. */

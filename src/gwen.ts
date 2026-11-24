@@ -2,6 +2,7 @@ import { callModel, type OpenRouter } from '@openrouter/agent';
 import type { ChatAdapter, Incoming, ReplyTarget } from './adapters/types.js';
 import type { Config } from './config.js';
 import { RecentLines, frameJobResult, frameMessage } from './frame.js';
+import { Budget, Handoffs, frameCapped, frameInterrupted, frameResume, handoffDirective, stamp, type Pending } from './handoff.js';
 import { routeMessage } from './jev.js';
 import { log, errText } from './log.js';
 import { McpHub } from './mcp.js';
@@ -22,6 +23,7 @@ import { skillTools } from './tools/skills.js';
 import { webTools } from './tools/web.js';
 import { ScheduleStore, Scheduler, type Schedule } from './schedule.js';
 import { scheduleTools } from './tools/schedule.js';
+import { handoffTools } from './tools/handoff.js';
 
 // The core. One front-model turn per incoming message:
 //
@@ -35,6 +37,10 @@ import { scheduleTools } from './tools/schedule.js';
 //
 // A finished research job comes back the same way: it becomes one more
 // front-model turn in the conversation that started it.
+//
+// A run that hits a limit while still calling tools ends in a handoff note
+// instead of a reply; the conversation is cleared and one more turn is queued
+// to carry the task on from the note. See handoff.ts.
 
 const ERROR_CHARS = 200;
 
@@ -65,11 +71,15 @@ export class Gwen {
     log.error('turn crashed', { conversationId, error: errText(e) }),
   );
   private schedule: Scheduler;
+  private handoffs: Handoffs;
+  /** Automatic resumes in a row, per conversation. A message from a person starts it again. */
+  private chain = new Map<string, number>();
 
   constructor(private cfg: Config) {
     this.client = createClient(cfg.openrouterKey, cfg.front);
     this.store = new Store(cfg.dataDir);
     this.transcript = new Transcript(cfg.dataDir);
+    this.handoffs = new Handoffs(cfg.dataDir, cfg.handoff);
     const backfilled = this.transcript.backfill(this.store.rawConversations());
     if (backfilled) log.info('transcript backfilled from conversation state', { lines: backfilled });
     this.memory = new Hindsight(cfg.memory);
@@ -99,6 +109,8 @@ export class Gwen {
   /** Run once at boot, after the adapters are registered. */
   recover(): void {
     for (const job of this.research.recover()) this.deliver(job);
+    // A resume that was queued when the last process died.
+    for (const pending of this.handoffs.all()) if (!pending.capped) this.queueResume(pending);
     this.schedule.start();
   }
 
@@ -137,15 +149,25 @@ export class Gwen {
     ]);
     this.recent.add(target.conversationId, message.senderName, message.text);
 
-    const input = frameMessage({
+    const framed = frameMessage({
       senderName: message.senderName,
       text: message.text,
       memories: prefetch.memories,
       routing,
       now: new Date(),
     });
-    await this.respond(target, input, new Date(started), {
+    // A task waiting to resume: show this turn its note. A queued resume stays
+    // queued behind this turn; a note stopped at the limit is used up here.
+    const conversationId = target.conversationId;
+    this.chain.delete(conversationId);
+    this.handoffs.restart(conversationId);
+    const pending = this.handoffs.pending(conversationId);
+    if (pending?.capped) this.handoffs.clear(conversationId);
+    const input = pending ? `${frameInterrupted(pending)}\n\n${framed}` : framed;
+    const extra = pending && !pending.capped ? handoffTools(() => this.handoffs.clear(conversationId)) : ([] as const);
+    await this.respond(target, input, new Date(started), extra, {
       kind: 'message',
+      interrupted: pending?.id,
       prepMs: Date.now() - started,
       recallMs: prefetch.ms,
       memories: prefetch.memories.length,
@@ -161,7 +183,7 @@ export class Gwen {
   /** Hand a settled research job to the front model to relay. */
   private deliver(job: Job): void {
     this.turns.push(job.conversationId, async () => {
-      const sent = await this.respond(job, frameJobResult(job, this.cfg.ownerName), new Date(), { kind: 'job-result', job: job.id });
+      const sent = await this.respond(job, frameJobResult(job, this.cfg.ownerName), new Date(), [], { kind: 'job-result', job: job.id });
       if (sent) this.research.markDelivered(job);
     });
   }
@@ -183,16 +205,62 @@ export class Gwen {
     });
     const input = `[Scheduled task ${entry.name}, fired ${localTime}] ${entry.prompt}`;
     this.turns.push(entry.target.conversationId, async () => {
-      await this.respond(entry.target, input, new Date(), { kind: 'schedule', id: entry.id, name: entry.name });
+      await this.respond(entry.target, input, new Date(), [], { kind: 'schedule', id: entry.id, name: entry.name });
+    });
+  }
+
+  /** Queue the turn that carries a task on from its handoff note. */
+  private queueResume(pending: Pending): void {
+    const { conversationId } = pending.target;
+    this.turns.push(conversationId, async () => {
+      // Cancelled, or replaced by a newer note, while this waited its turn.
+      const current = this.handoffs.pending(conversationId);
+      if (current?.id !== pending.id) return;
+      this.handoffs.clear(conversationId);
+      this.chain.set(conversationId, current.resume);
+      const input = frameResume(current, this.cfg.handoff.maxResumes, this.cfg.ownerName);
+      await this.respond(current.target, input, new Date(), [], { kind: 'resume', handoff: current.id, resume: current.resume });
     });
   }
 
   /**
+   * A run ended in a handoff note. Save it, clear the conversation, and queue
+   * the resume, or tell the owner when the limit on resumes is reached.
+   */
+  private async handOff(target: ReplyTarget, note: string, budget: Budget, record: TurnRecord, send: (text: string) => Promise<void>): Promise<void> {
+    const { conversationId } = target;
+    const at = new Date();
+    const pending = this.handoffs.save(target, note, budget.reason!, this.chain.get(conversationId) ?? 0, at);
+    const archived = this.store.retire(conversationId, `handoff-${stamp(at)}`);
+    Object.assign(record, {
+      handoff: pending.id,
+      handoffReason: pending.reason,
+      handoffChars: note.length,
+      nextResume: pending.resume,
+      capped: pending.capped || undefined,
+      archived,
+    });
+    if (pending.capped) {
+      this.chain.delete(conversationId);
+      await send(frameCapped(pending, this.cfg.handoff.maxResumes));
+    } else {
+      this.queueResume(pending);
+    }
+  }
+
+  /**
    * Run the front model on `input` and post its reply. Never throws: a failure
-   * is reported to the user and logged. Returns whether a message was posted.
+   * is reported to the user and logged. Returns whether the turn was dealt
+   * with: a message was posted, or the task was handed off to a resume turn.
    * `asOf` is when the turn began: search_history sees nothing later.
    */
-  private async respond(target: ReplyTarget, input: string, asOf: Date, record: TurnRecord): Promise<boolean> {
+  private async respond(
+    target: ReplyTarget,
+    input: string,
+    asOf: Date,
+    extraTools: ReturnType<typeof handoffTools> | readonly [],
+    record: TurnRecord,
+  ): Promise<boolean> {
     const started = Date.now();
     record.conversationId = target.conversationId;
     const adapter = this.adapters.get(target.adapter);
@@ -206,19 +274,36 @@ export class Gwen {
     };
     const stopTyping = adapter.typing(target.conversationId, target.replyRef);
     let sent = false;
+    const budget = this.handoffs.enabled
+      ? new Budget({
+          maxSteps: this.cfg.front.maxSteps,
+          inputTokens: this.cfg.handoff.inputTokens,
+          items: this.cfg.handoff.items,
+        })
+      : undefined;
     try {
       const run = callModel(this.client, {
         ...modelFields(this.cfg.front, 'throughput'),
         instructions: this.instructions,
         input,
-        tools: this.tools(target, asOf),
+        tools: [...this.tools(target, asOf), ...extraTools],
         state: this.store.state(target.conversationId),
-        stopWhen: maxSteps(this.cfg.front.maxSteps),
+        stopWhen: budget ? budget.stopWhen : maxSteps(this.cfg.front.maxSteps),
+        // What the model is asked for when a limit stops it mid-task.
+        ...(budget ? { allowFinalResponse: handoffDirective(this.cfg.ownerName) } : {}),
         maxOutputTokens: this.cfg.front.maxOutputTokens,
         sessionId: target.conversationId.slice(0, 256),
       });
       const { text, usage } = await finish(run);
       Object.assign(record, usage, { modelMs: Date.now() - started, emptyReply: !text || undefined });
+
+      if (budget?.handedOff(usage.rounds) && text) {
+        await this.handOff(target, text, budget, record, async (message) => {
+          await send(message);
+          this.recent.add(target.conversationId, 'Gwen', message);
+        });
+        return (sent = true);
+      }
 
       const reply = text || EMPTY_REPLY;
       await send(reply);

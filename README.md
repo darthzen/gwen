@@ -134,6 +134,30 @@ decides. A model named any other way defaults to `none` (front) or `low`
 `src/local.ts` is the whole of the difference: llama-server's Responses API
 omits fields the Agent SDK requires, and that file fills them in.
 
+## Long tasks: handoff, clear, resume
+
+A task that needs more than one run's budget carries itself on. The host watches each front-model run and stops it at the first limit reached:
+
+| Limit | Setting | Default |
+|---|---|---|
+| Model rounds in the run | `GWEN_FRONT_MAX_STEPS` | 8 |
+| Prompt tokens of the newest round | `GWEN_HANDOFF_INPUT_TOKENS` | 180000 (0 is off) |
+| History items the run has added | `GWEN_HANDOFF_ITEMS` | 80 (0 is off) |
+
+When a limit stops a run that was still calling tools, the model is asked, with tools off, for a handoff note to itself (task, done, state, next, open). The host then:
+
+1. saves the note to `handoffs/<conversation>.md` (every note is also kept as `<conversation>.<time>.md`);
+2. moves the conversation state to `backup/<conversation>.handoff-<time>.json`, so the next turn starts empty;
+3. queues a resume turn whose input is the note.
+
+Nothing is posted to the chat for a handoff or a resume. The reply that ends the task is posted as usual. The transcript is untouched, so `search_history` still reaches the cleared conversation.
+
+`GWEN_MAX_RESUMES` (default 10) caps automatic resumes in a row. At the cap Gwen posts where the task stands and waits; the next message from a person gets the note and starts the count again. `GWEN_MAX_RESUMES=0` turns the whole feature off and a run that hits its step limit ends with a final answer, as before 0.9.0.
+
+A message from a person while a resume is queued runs first, with the note in front of it, and the resume runs after it. That turn alone has a `cancel_resume` tool, for a message that stops or changes the task. A queued resume survives a restart: it is re-queued from `handoffs/<conversation>.pending.json` at boot.
+
+Turn log fields: `handoff`, `handoffReason` (`steps`, `tokens`, `items`), `nextResume`, `capped` on the turn that handed off; `kind: "resume"` on the turn that carried on.
+
 ## Scheduling
 
 Gwen can schedule tasks that fire on a cron schedule and send a prompt to a

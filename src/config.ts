@@ -40,6 +40,16 @@ export interface ModelConfig {
   temperature?: number;
 }
 
+/** Automatic handoff, clear and resume of a front-model task that outgrows one run. See src/handoff.ts. */
+export interface HandoffConfig {
+  /** Automatic resumes in a row before Gwen stops and reports. 0 turns handoff off. */
+  maxResumes: number;
+  /** Hand off when one round's prompt reaches this many tokens. 0 is off. */
+  inputTokens: number;
+  /** Hand off when one run has added this many history items. 0 is off. */
+  items: number;
+}
+
 export interface ResearchConfig extends ModelConfig {
   timeoutMs: number;
   maxCostUsd: number;
@@ -95,6 +105,7 @@ export interface TelegramConfig {
 export interface Config {
   openrouterKey: string;
   front: ModelConfig;
+  handoff: HandoffConfig;
   research: ResearchConfig;
   jev: JevConfig;
   memory: MemoryConfig;
@@ -179,6 +190,11 @@ export function loadConfig(): Config {
       baseUrl: text('GWEN_FRONT_BASE_URL', ''),
       apiKey: text('GWEN_FRONT_API_KEY', ''),
       temperature: optionalNumber('GWEN_FRONT_TEMPERATURE'),
+    },
+    handoff: {
+      maxResumes: number('GWEN_MAX_RESUMES', 10),
+      inputTokens: number('GWEN_HANDOFF_INPUT_TOKENS', 180_000),
+      items: number('GWEN_HANDOFF_ITEMS', 80),
     },
     research: {
       model: researchModel,
