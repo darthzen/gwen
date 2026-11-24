@@ -9,6 +9,17 @@ export const OPENROUTER_API = 'https://openrouter.ai/api';
 
 const TIMEOUT_MS = 90_000;
 
+// The SDK's default keeps retrying a failing request for an hour, once a
+// minute. A request that fails the same way every time then holds its
+// conversation's queue for that hour and the user hears nothing. A minute is
+// enough to ride out a restart or a rate limit; after it the turn fails and
+// says so.
+const RETRIES = {
+  strategy: 'backoff',
+  backoff: { initialInterval: 1000, maxInterval: 15_000, exponent: 2, maxElapsedTime: 60_000 },
+  retryConnectionErrors: true,
+} as const;
+
 /**
  * The client for one model. A model with a `baseUrl` is served from that
  * address (a self-hosted llama-server); every other model goes to OpenRouter.
@@ -20,6 +31,7 @@ export function createClient(apiKey: string, cfg: ModelConfig): OpenRouter {
       serverURL: cfg.baseUrl,
       httpClient: localHttpClient(),
       timeoutMs: TIMEOUT_MS,
+      retryConfig: RETRIES,
     });
   }
   return new OpenRouter({
@@ -27,6 +39,7 @@ export function createClient(apiKey: string, cfg: ModelConfig): OpenRouter {
     httpReferer: 'https://github.com/darthzen/gwen',
     appTitle: 'Gwen',
     timeoutMs: TIMEOUT_MS,
+    retryConfig: RETRIES,
   });
 }
 

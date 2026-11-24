@@ -23,6 +23,12 @@ export interface ModelConfig {
   /** Upper bound on model rounds in one run. */
   maxSteps: number;
   /**
+   * Upper bound on the tokens of one model round: the reply, or a tool call
+   * with its arguments. Unset sends no limit. A round that hits it is cut
+   * off, so it has to fit the largest file Gwen writes in one tool call.
+   */
+  maxOutputTokens?: number;
+  /**
    * Where the model is served. Empty means OpenRouter. Set to the `/v1` address
    * of a self-hosted llama-server to run this model there instead; `model` is
    * then that server's model name.
@@ -169,6 +175,7 @@ export function loadConfig(): Config {
       model: frontModel,
       effort: effortFor('GWEN_FRONT_EFFORT', frontModel, 'none'),
       maxSteps: number('GWEN_FRONT_MAX_STEPS', 8),
+      maxOutputTokens: number('GWEN_FRONT_MAX_OUTPUT_TOKENS', 8192),
       baseUrl: text('GWEN_FRONT_BASE_URL', ''),
       apiKey: text('GWEN_FRONT_API_KEY', ''),
       temperature: optionalNumber('GWEN_FRONT_TEMPERATURE'),

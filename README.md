@@ -115,6 +115,7 @@ research worker, or both can instead run on a self-hosted llama.cpp
 GWEN_FRONT_BASE_URL=http://llama-server.ai.svc.cluster.local:8080/v1
 GWEN_FRONT_MODEL=qwen3.8-27b-uncensored   # the server's model name
 GWEN_FRONT_TEMPERATURE=0.8                # optional; unset leaves the server's default
+GWEN_FRONT_MAX_OUTPUT_TOKENS=8192         # optional; cap on one round, tool-call arguments included
 ```
 
 `GWEN_RESEARCH_BASE_URL`, `GWEN_RESEARCH_MODEL` and `GWEN_RESEARCH_TEMPERATURE`

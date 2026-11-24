@@ -36,7 +36,6 @@ import { scheduleTools } from './tools/schedule.js';
 // A finished research job comes back the same way: it becomes one more
 // front-model turn in the conversation that started it.
 
-const MAX_REPLY_TOKENS = 2048;
 const ERROR_CHARS = 200;
 
 // This model is known to return empty turns now and then. Silence is the one
@@ -215,7 +214,7 @@ export class Gwen {
         tools: this.tools(target, asOf),
         state: this.store.state(target.conversationId),
         stopWhen: maxSteps(this.cfg.front.maxSteps),
-        maxOutputTokens: MAX_REPLY_TOKENS,
+        maxOutputTokens: this.cfg.front.maxOutputTokens,
         sessionId: target.conversationId.slice(0, 256),
       });
       const { text, usage } = await finish(run);

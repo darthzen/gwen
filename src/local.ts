@@ -4,7 +4,14 @@ import { HTTPClient } from '@openrouter/sdk';
 // speaks the same Responses API the Agent SDK calls, with one gap: its
 // streamed events leave out fields the SDK's schema requires, so the SDK
 // discards the terminal event and reports "Stream ended without completion
-// event". This fills those fields in. Nothing else about the exchange changes.
+// event". This fills those fields in.
+//
+// It also repairs what Gwen sends. A reply cut off at the output limit can
+// leave a tool call whose arguments are half a JSON document. The SDK answers
+// that call with an error and keeps both in the history, and llama-server
+// then rejects every later request that replays them with a 500. The call's
+// arguments are replaced with an empty object on the way out, so the model
+// sees its failed call and the error, and can try again.
 //
 // The reply is read whole before it is handed on. Gwen posts a finished reply
 // and never streams to the user, so nothing is lost by that.
@@ -58,11 +65,65 @@ export function completeEvents(body: string): string {
     .join('\n');
 }
 
+const CUT_OFF_HINT =
+  ' The arguments were probably cut off at the output limit. Send less in one call: write a long file as several smaller appends.';
+
+function parses(json: unknown): boolean {
+  if (typeof json !== 'string') return true;
+  try {
+    JSON.parse(json);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Make every tool call in a request body one the server can replay. Returns
+ * the body unchanged when there is nothing to repair or it is not a request
+ * with an `input` list.
+ */
+export function repairToolCalls(body: string): string {
+  let request: { input?: unknown };
+  try {
+    request = JSON.parse(body);
+  } catch {
+    return body;
+  }
+  if (!Array.isArray(request?.input)) return body;
+  const items = request.input as Array<Record<string, unknown>>;
+  const broken = new Set<unknown>();
+  for (const item of items) {
+    if (item?.type === 'function_call' && !parses(item.arguments)) {
+      item.arguments = '{}';
+      broken.add(item.call_id);
+    }
+  }
+  if (broken.size === 0) return body;
+  for (const item of items) {
+    if (item?.type === 'function_call_output' && broken.has(item.call_id) && typeof item.output === 'string') {
+      item.output += CUT_OFF_HINT;
+    }
+  }
+  return JSON.stringify(request);
+}
+
+async function repaired(input: RequestInfo | URL, init?: RequestInit): Promise<[RequestInfo | URL, RequestInit?]> {
+  if (!(input instanceof Request) || input.method !== 'POST') return [input, init];
+  const body = await input.clone().text();
+  const fixed = repairToolCalls(body);
+  if (fixed === body) return [input, init];
+  const headers = new Headers(input.headers);
+  headers.delete('content-length');
+  return [new Request(input.url, { method: 'POST', headers, body: fixed, signal: input.signal }), init];
+}
+
 /** An HTTP client for the SDK that completes a local server's event streams. */
 export function localHttpClient(): HTTPClient {
   return new HTTPClient({
-    fetcher: async (input, init) => {
-      const res = await fetch(input, init);
+    fetcher: async (rawInput, rawInit) => {
+      const [input, init] = await repaired(rawInput, rawInit);
+      const res = init == null ? await fetch(input) : await fetch(input, init);
       if (!(res.headers.get('content-type') ?? '').includes('text/event-stream')) return res;
       return new Response(completeEvents(await res.text()), { status: res.status, headers: res.headers });
     },
