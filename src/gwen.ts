@@ -2,6 +2,7 @@ import { callModel, type OpenRouter } from '@openrouter/agent';
 import type { ChatAdapter, Incoming, ReplyTarget } from './adapters/types.js';
 import type { Config } from './config.js';
 import { RecentLines, frameJobResult, frameMessage } from './frame.js';
+import { formatNow } from './transcript.js';
 import { Budget, Handoffs, frameCapped, frameInterrupted, frameResume, handoffDirective, stamp, type Pending } from './handoff.js';
 import { routeMessage } from './jev.js';
 import { log, errText } from './log.js';
@@ -155,6 +156,7 @@ export class Gwen {
       memories: prefetch.memories,
       routing,
       now: new Date(),
+      timeZone: this.cfg.timeZone,
     });
     // A task waiting to resume: show this turn its note. A queued resume stays
     // queued behind this turn; a note stopped at the limit is used up here.
@@ -198,12 +200,8 @@ export class Gwen {
       });
       return;
     }
-    const localTime = new Date().toLocaleString('en-US', {
-      timeZone: this.cfg.timeZone,
-      year: 'numeric', month: '2-digit', day: '2-digit',
-      hour: '2-digit', minute: '2-digit', hour12: false,
-    });
-    const input = `[Scheduled task ${entry.name}, fired ${localTime}] ${entry.prompt}`;
+    const firedAt = formatNow(new Date(), this.cfg.timeZone);
+    const input = `[Scheduled task ${entry.name}, fired ${firedAt}] ${entry.prompt}`;
     this.turns.push(entry.target.conversationId, async () => {
       await this.respond(entry.target, input, new Date(), [], { kind: 'schedule', id: entry.id, name: entry.name });
     });

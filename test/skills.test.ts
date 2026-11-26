@@ -89,3 +89,36 @@ test('a large tool result keeps its start and end', () => {
   assert.equal(big.truncated, true);
   assert.match(big.result, /8000 characters omitted/);
 });
+
+test('skill_tool log lines carry the args as JSON truncated to 300 chars', async () => {
+  const { skillTools } = await import('../src/tools/skills.js');
+  const { McpHub } = await import('../src/mcp.js');
+  const { parseSkill } = await import('../src/skills.js');
+
+  const skill = parseSkill('---\nname: t\ndescription: d\nmcp: srv http://a/mcp\n---\nbody');
+  const hub = new McpHub(skill.mcp);
+  const tools = skillTools(new Map([['t', skill]]), hub);
+  const skillTool = tools.find((t) => t.function.name === 'skill_tool')!;
+
+  const lines: string[] = [];
+  const origWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((chunk: string) => { lines.push(chunk); return true; }) as any;
+
+  // Mock hub.call to avoid a real connection
+  (hub as any).call = async () => ({ text: 'ok' });
+
+  const longArgs = { query: 'x'.repeat(500), other: 1 };
+  await skillTool.function.execute({ server: 'srv', tool: 'someTool', arguments: longArgs });
+
+  process.stdout.write = origWrite;
+
+  const logLines = lines.map((l) => l.trim()).filter(Boolean);
+  assert.ok(logLines.length >= 1, 'expected at least one log line');
+  const parsed = JSON.parse(logLines[0]);
+  assert.equal(parsed.msg, 'skill_tool');
+  assert.equal(parsed.server, 'srv');
+  assert.equal(parsed.tool, 'someTool');
+  assert.ok(parsed.args, 'args field must be present');
+  assert.equal(parsed.args.length <= 300, true, 'args must be truncated to 300 chars');
+  assert.ok(parsed.args.includes('"query"'), 'args should contain the query key');
+});

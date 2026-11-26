@@ -168,7 +168,7 @@ function inRange(e: Entry, range: Range): boolean {
 // ---- backfill ---------------------------------------------------------------
 
 /** A message as frameMessage wrote it: the time, then "Speaker: text" after the context block. */
-const FRAMED = /^<context machine-generated="true">\nnow: (\S+) \(UTC\)\n[\s\S]*?\n<\/context>\n\n([^:\n]+): ([\s\S]*)$/;
+const FRAMED = /^<context machine-generated="true">\nnow: (?:[^\n]*; )?(\S+) (?:\(UTC\)|UTC)\n[\s\S]*?\n<\/context>\n\n([^:\n]+): ([\s\S]*)$/;
 
 interface StoredItem {
   role?: string;
@@ -218,9 +218,10 @@ export function entriesFromState(state: unknown): Entry[] {
 
 // ---- dates in the owner's time zone ----------------------------------------
 
-function wallClock(at: Date, timeZone: string): Record<string, string> {
+export function wallClock(at: Date, timeZone: string): Record<string, string> {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone,
+    weekday: 'long',
     hourCycle: 'h23',
     year: 'numeric',
     month: '2-digit',
@@ -250,4 +251,10 @@ export function dayStart(day: string, timeZone: string, addDays = 0): Date {
 export function localTime(t: string, timeZone: string): string {
   const w = wallClock(new Date(t), timeZone);
   return `${w.year}-${w.month}-${w.day} ${w.hour}:${w.minute} ${w.timeZoneName}`;
+}
+
+/** `Thursday 2026-11-26 11:29 CST (America/Chicago); 2026-11-26T17:29:33.552Z UTC` */
+export function formatNow(at: Date, timeZone: string): string {
+  const w = wallClock(at, timeZone);
+  return `${w.weekday} ${w.year}-${w.month}-${w.day} ${w.hour}:${w.minute} ${w.timeZoneName} (${timeZone}); ${at.toISOString()} UTC`;
 }
