@@ -41,13 +41,7 @@ test('a framed message puts the context block first and the speaker line last', 
 });
 
 test('now line: after 18:00 Central the UTC date is the next day', () => {
-  // 2026-11-26T23:30:00Z is Thursday 2026-11-26 17:30 CST; UTC date is still the 26th.
-  // Use 2026-11-26T18:30:00Z → Thursday 2026-11-26 12:30 CST.
-  // For the "next day" case: 2026-11-26T23:59:00Z → Thursday 2026-11-26 17:59 CST (same day).
-  // Actually: 2026-11-26T12:00:00Z → Thursday 2026-11-26 06:00 CST.
-  // The interesting case: UTC date 27, Central date 26.
-  // 2026-11-27T02:00:00Z → Friday 2026-11-27 20:00 CST? No: UTC-6 → 2026-11-26T20:00 CST.
-  // So: 2026-11-27T02:00:00Z is Friday Nov 27 02:00 UTC = Thursday Nov 26 20:00 CST.
+  // 2026-11-27T02:00Z is Thursday 2026-11-26 20:00 CST: the UTC date is a day ahead.
   const framed = frameMessage({
     senderName: 'Rick',
     text: 'hi',

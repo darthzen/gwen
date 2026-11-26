@@ -102,6 +102,28 @@ test('backfill: messages keep their own time, only the sent reply is kept, machi
   assert.deepEqual(entriesFromState({ nothing: true }), []);
 });
 
+test('backfill: a pre-0.9.1 frame with an ISO-only now line keeps its time too', () => {
+  const oldFramed =
+    `<context machine-generated="true">\nnow: 2026-11-22T12:00:00.000Z (UTC)\nrouting: x\nmemory:\n- [about-user] Rick: said something\n</context>\n\nRick: old-style frame`;
+  const state = {
+    id: 'telegram:2',
+    createdAt: Date.parse('2026-11-22T00:00:00Z'),
+    messages: [
+      { role: 'user', content: oldFramed },
+      said('got it'),
+      { role: 'user', content: framed('2026-11-22T13:00:00.000Z', 'new-style frame') },
+    ],
+  };
+  assert.deepEqual(
+    entriesFromState(state).map((e) => [e.t, e.speaker, e.text]),
+    [
+      ['2026-11-22T12:00:00.000Z', 'Rick', 'old-style frame'],
+      ['2026-11-22T12:00:00.001Z', 'Gwen', 'got it'],
+      ['2026-11-22T13:00:00.000Z', 'Rick', 'new-style frame'],
+    ],
+  );
+});
+
 test('backfill runs once: never into a transcript that already has lines', () => {
   const state = { id: 'buzz:a', messages: [{ role: 'user', content: framed('2026-11-22T01:00:00.000Z', 'hello') }] };
   const fresh = new Transcript(dir());

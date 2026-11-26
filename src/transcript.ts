@@ -168,7 +168,7 @@ function inRange(e: Entry, range: Range): boolean {
 // ---- backfill ---------------------------------------------------------------
 
 /** A message as frameMessage wrote it: the time, then "Speaker: text" after the context block. */
-const FRAMED = /^<context machine-generated="true">\nnow: [^\n]*; (\S+) UTC\n[\s\S]*?\n<\/context>\n\n([^:\n]+): ([\s\S]*)$/;
+const FRAMED = /^<context machine-generated="true">\nnow: (?:[^\n]*; )?(\S+) (?:\(UTC\)|UTC)\n[\s\S]*?\n<\/context>\n\n([^:\n]+): ([\s\S]*)$/;
 
 interface StoredItem {
   role?: string;
