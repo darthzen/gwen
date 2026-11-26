@@ -71,7 +71,7 @@ test('a line cut short by a crash is skipped, not fatal', () => {
 });
 
 const framed = (now: string, text: string) =>
-  `<context machine-generated="true">\nnow: ${now} (UTC)\nrouting: x\nmemory:\n- [about-user] Rick: said something\n</context>\n\nRick: ${text}`;
+  `<context machine-generated="true">\nnow: Sunday 2026-11-22 06:00 CST (America/Chicago); ${now} UTC\nrouting: x\nmemory:\n- [about-user] Rick: said something\n</context>\n\nRick: ${text}`;
 const said = (text: string) => ({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] });
 
 test('backfill: messages keep their own time, only the sent reply is kept, machine input is skipped', () => {

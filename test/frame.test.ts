@@ -31,11 +31,34 @@ test('a framed message puts the context block first and the speaker line last', 
     memories: [],
     routing: routed({ route: 'direct', picked: 'direct', confidence: 1 }),
     now: new Date('2026-11-22T12:00:00Z'),
+    timeZone: 'America/Chicago',
   });
   const lines = framed.split('\n');
   assert.equal(lines[0], '<context machine-generated="true">');
-  assert.equal(lines[1], 'now: 2026-11-22T12:00:00.000Z (UTC)');
+  // 2026-11-22T12:00:00Z is Sunday 2026-11-22 06:00 CST (UTC-6)
+  assert.equal(lines[1], 'now: Sunday 2026-11-22 06:00 CST (America/Chicago); 2026-11-22T12:00:00.000Z UTC');
   assert.equal(lines.at(-1), 'Rick: hello');
+});
+
+test('now line: after 18:00 Central the UTC date is the next day', () => {
+  // 2026-11-26T23:30:00Z is Thursday 2026-11-26 17:30 CST; UTC date is still the 26th.
+  // Use 2026-11-26T18:30:00Z → Thursday 2026-11-26 12:30 CST.
+  // For the "next day" case: 2026-11-26T23:59:00Z → Thursday 2026-11-26 17:59 CST (same day).
+  // Actually: 2026-11-26T12:00:00Z → Thursday 2026-11-26 06:00 CST.
+  // The interesting case: UTC date 27, Central date 26.
+  // 2026-11-27T02:00:00Z → Friday 2026-11-27 20:00 CST? No: UTC-6 → 2026-11-26T20:00 CST.
+  // So: 2026-11-27T02:00:00Z is Friday Nov 27 02:00 UTC = Thursday Nov 26 20:00 CST.
+  const framed = frameMessage({
+    senderName: 'Rick',
+    text: 'hi',
+    memories: [],
+    routing: routed({ route: 'direct', picked: 'direct', confidence: 1 }),
+    now: new Date('2026-11-27T02:00:00Z'),
+    timeZone: 'America/Chicago',
+  });
+  const lines = framed.split('\n');
+  // UTC says Friday Nov 27; Central says Thursday Nov 26 20:00 CST
+  assert.equal(lines[1], 'now: Thursday 2026-11-26 20:00 CST (America/Chicago); 2026-11-27T02:00:00.000Z UTC');
 });
 
 test('a job result carries the report when done and the error when failed', () => {

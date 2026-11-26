@@ -1,4 +1,5 @@
 import { ROUTES, type Routing } from './jev.js';
+import { formatNow } from './transcript.js';
 import type { Memory } from './memory.js';
 import type { Job } from './store.js';
 
@@ -30,13 +31,14 @@ export interface MessageFrame {
   memories: Memory[];
   routing: Routing;
   now: Date;
+  timeZone: string;
 }
 
 /** A message from a person, with the context block the persona describes. */
 export function frameMessage(f: MessageFrame): string {
   return [
     '<context machine-generated="true">',
-    `now: ${f.now.toISOString()} (UTC)`,
+    `now: ${formatNow(f.now, f.timeZone)}`,
     `routing: ${formatRouting(f.routing)}`,
     'memory:',
     formatMemories(f.memories),

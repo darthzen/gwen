@@ -70,7 +70,8 @@ export function skillTools(skills: ReadonlyMap<string, Skill>, hub: McpHub) {
     execute: async ({ server, tool: toolName, arguments: args }) => {
       const started = Date.now();
       // Names and timing only: arguments and results can hold anything.
-      const record = { server: server.trim(), tool: toolName.trim() };
+      const argsJson = JSON.stringify(args).slice(0, 300);
+      const record = { server: server.trim(), tool: toolName.trim(), args: argsJson };
       try {
         const result = clipResult(await hub.call(record.server, record.tool, args));
         log.info('skill_tool', { ...record, ms: Date.now() - started, chars: result.result.length });
