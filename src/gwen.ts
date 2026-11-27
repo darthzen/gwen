@@ -11,12 +11,14 @@ import { Hindsight } from './memory.js';
 import { createClient, finish, maxSteps, modelFields } from './openrouter.js';
 import { KeyedQueue } from './queue.js';
 import { Research } from './research.js';
+import { MailCensus } from './mailcensus.js';
 import { Sandbox } from './sandbox.js';
 import { loadSkills, skillIndex } from './skills.js';
 import { Store, type Job } from './store.js';
 import { Transcript } from './transcript.js';
 import { historyTools } from './tools/history.js';
 import { libraryTools } from './tools/library.js';
+import { mailCensusTools } from './tools/mailcensus.js';
 import { memoryTools } from './tools/memory.js';
 import { researchTools } from './tools/research.js';
 import { sandboxTools } from './tools/sandbox.js';
@@ -58,6 +60,7 @@ export class Gwen {
   private transcript: Transcript;
   private memory: Hindsight;
   private research: Research;
+  private census: MailCensus;
   private web: ReturnType<typeof webTools>;
   /** Empty when no sandbox is configured. */
   private sandbox: ReturnType<typeof sandboxTools> | readonly [];
@@ -92,8 +95,21 @@ export class Gwen {
     this.instructions = [cfg.persona, skillIndex(skills)].filter(Boolean).join('\n\n');
     log.info('skills loaded', { skills: [...skills.keys()], mcpServers: this.mcp.servers });
     const researchClient = createClient(cfg.openrouterKey, cfg.research);
-    this.research = new Research(cfg.research, researchClient, this.store, this.web, this.memory, (job) =>
-      this.deliver(job),
+    this.research = new Research(
+      cfg.research,
+      (c) => createClient(cfg.openrouterKey, c),
+      researchClient,
+      this.store,
+      this.web,
+      this.memory,
+      (job) => this.deliver(job),
+    );
+    this.census = new MailCensus(
+      cfg.dataDir,
+      { email: 'rick@theashfords.org', mcpServer: 'workspace', sheetName: 'Mailing list census' },
+      (tool, args) => this.mcp.call('workspace', tool, args),
+      this.store,
+      (job) => this.deliver(job),
     );
     this.schedule = new Scheduler(
       new ScheduleStore(cfg.dataDir),
@@ -110,6 +126,7 @@ export class Gwen {
   /** Run once at boot, after the adapters are registered. */
   recover(): void {
     for (const job of this.research.recover()) this.deliver(job);
+    for (const job of this.census.recover()) this.deliver(job);
     // A resume that was queued when the last process died.
     for (const pending of this.handoffs.all()) if (!pending.capped) this.queueResume(pending);
     this.schedule.start();
@@ -128,8 +145,9 @@ export class Gwen {
   async idle(): Promise<void> {
     // A turn can start research and a settling job queues a delivery turn, so
     // drain both until neither has anything left.
-    while (this.research.busy || this.turns.busy) {
+    while (this.research.busy || this.census.busy || this.turns.busy) {
       await this.research.idle();
+      await this.census.idle();
       await this.turns.drain();
     }
   }
@@ -344,6 +362,7 @@ export class Gwen {
       ...this.sandbox,
       ...this.skills,
       ...researchTools(this.research, target),
+      ...mailCensusTools(this.census, target),
       ...memoryTools(this.memory, this.cfg.ownerName, target.conversationId),
       ...historyTools(this.transcript, {
         ownerName: this.cfg.ownerName,

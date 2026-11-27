@@ -38,6 +38,11 @@ export interface ModelConfig {
   apiKey: string;
   /** Sampling temperature. Unset leaves it to the model, preset or server. */
   temperature?: number;
+  /**
+   * The request timeout for this model alone. Unset uses the default that
+   * fits a self-hosted model's full output (see src/openrouter.ts).
+   */
+  timeoutMs?: number;
 }
 
 /** Automatic handoff, clear and resume of a front-model task that outgrows one run. See src/handoff.ts. */
@@ -50,8 +55,11 @@ export interface HandoffConfig {
   items: number;
 }
 
-export interface ResearchConfig extends ModelConfig {
+export interface ResearchConfig extends Omit<ModelConfig, 'timeoutMs'> {
+  /** The whole job's deadline: every model round and tool call inside it. */
   timeoutMs: number;
+  /** The per-request timeout for the research model. Unset uses the default. */
+  requestTimeoutMs?: number;
   maxCostUsd: number;
 }
 
@@ -190,6 +198,7 @@ export function loadConfig(): Config {
       baseUrl: text('GWEN_FRONT_BASE_URL', ''),
       apiKey: text('GWEN_FRONT_API_KEY', ''),
       temperature: optionalNumber('GWEN_FRONT_TEMPERATURE'),
+      timeoutMs: optionalNumber('GWEN_FRONT_TIMEOUT_MS'),
     },
     handoff: {
       maxResumes: number('GWEN_MAX_RESUMES', 10),
@@ -203,7 +212,8 @@ export function loadConfig(): Config {
       baseUrl: text('GWEN_RESEARCH_BASE_URL', ''),
       apiKey: text('GWEN_RESEARCH_API_KEY', ''),
       temperature: optionalNumber('GWEN_RESEARCH_TEMPERATURE'),
-      timeoutMs: number('GWEN_RESEARCH_TIMEOUT_MS', 10 * 60_000),
+      timeoutMs: number('GWEN_RESEARCH_JOB_TIMEOUT_MS', 10 * 60_000),
+      requestTimeoutMs: optionalNumber('GWEN_RESEARCH_TIMEOUT_MS'),
       maxCostUsd: number('GWEN_RESEARCH_MAX_COST_USD', 0.75),
     },
     jev: {
