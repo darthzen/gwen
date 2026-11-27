@@ -564,6 +564,7 @@ class FakeWorkspace {
         const ids = args.message_ids as string[];
         assert.ok(Array.isArray(ids) && ids.length > 0 && ids.length <= 100);
         assert.equal(args.format, 'metadata');
+
         if (ids.length === 1 && this.neverRecovers.has(ids[0]!)) {
           // The live server's retry answer carries the warning and no block
           // at all, so the census sees four warning-only attempts.
@@ -1005,13 +1006,16 @@ test('integration: a rate-limited id recovers on the single-id retry, with pacin
   try {
     const fake = new FakeWorkspace();
     fake.warnOnce.add('fake0000');
-    const census = makeCensus(dir, fake, { failIfUnreadable: false });
+    // Default failIfUnreadable (true): a recovered id must not fail the slice.
+    const census = makeCensus(dir, fake);
     const job = census.start(target, T0, T0 + 3 * DAY);
     await census.idle();
     assert.equal(job.status, 'done');
     const summary = JSON.parse(job.report!) as Record<string, unknown>;
     assert.equal(summary.messagesScanned, 6);
     assert.equal(summary.listMessages, 3);
+    // BUG A: the recovered id was warned in the first response but came back
+    // on the retry, so unreadable must be 0, not 1.
     assert.equal(summary.unreadableTotal, 0);
     // The first batch of day 0 warned fake0000; the census retried it as a
     // single-id batch and the fake returned the real block.
@@ -1047,13 +1051,154 @@ test('integration: an id that never recovers fails the run, coverage does not ad
     // The failing slice is the first one, so coverage never advanced.
     const state = loadState(dir)!;
     assert.equal(state.coveredBefore, 0);
+    // BUG B: the slice threw, so the state file is byte-identical to what
+    // it was before the slice (apart from sheetId). The unreadable count
+    // lives in the job error, not the state file.
+    assert.equal(state.unreadableTotal, 0, 'state file must be unchanged after a failed slice');
+    assert.equal(state.messagesScanned, 0, 'state file must be unchanged after a failed slice');
+    assert.ok(job.error!.includes('unreadable'), `job error should mention unreadable, got: ${job.error}`);
     // Four attempts with a growing wait, capped at 60s: 5 + 10 + 20 + 40.
     // The pacing waits (15s each) are excluded by the 5s modulus.
     const retryWaits = fake.sleeps.filter((ms) => ms >= RETRY_BASE_MS && ms <= 60_000 && ms % 5_000 === 0);
     assert.deepEqual(retryWaits, [5_000, 10_000, 20_000, 40_000]);
     assert.equal(retryWaits.reduce((a, b) => a + b, 0), 75_000);
-    // The vanished id was logged once per batch call and counted unreadable.
-    assert.equal(state.unreadableTotal, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- Round 4: slice atomicity and recovery equivalence ----------------------
+
+test('integration: a slice that fails after some batches succeeded leaves the state file unchanged', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailcensus-'));
+  try {
+    const fake = new FakeWorkspace();
+    // Day 0 is scanned cleanly; day 1 has a never-recovers id that fails the
+    // slice after the day-0 batches already succeeded and were aggregated.
+    // The window is [T0, T0+2d) so only day 0 is scanned... wait, that's
+    // not right. The window [T0, T0+2d) scans day 0 and day 1. Day 0 is
+    // fake0000, day 1 is fake0001. neverRecovers on fake0001 means day 1
+    // fails. But the fake's batch call gets both days' ids at once (2 ids),
+    // so the batch for day 0 succeeds and the batch for day 1 fails.
+    // Actually the fake returns one page per day, so the search returns
+    // day 0 first, then day 1. The metadata batch for day 0 (fake0000)
+    // succeeds; the batch for day 1 (fake0001) has the neverRecovers id.
+    // Day 0 is scanned cleanly (2 messages). Day 1 has a warnOnce id that
+    // never recovers (the fake answers the retry with no block and no
+    // warning), so the census counts it unreadable. With
+    // failIfUnreadable: false the slice completes but reports the
+    // unreadable id. The day-0 batches already succeeded and were
+    // aggregated into the scratch; the slice's unreadable count is
+    // non-zero, which with failIfUnreadable: true would have thrown.
+    // Here we test the state file after the slice: the day-0 data is in
+    // the state (the slice completed), and the unreadable id is counted.
+    // neverRecovers: the batch warns fake0001, and every single-id retry
+    // answers with no block and no warning. With the default
+    // failIfUnreadable (true), the slice throws after the day-0 batches
+    // already succeeded and were aggregated into the scratch. The state
+    // file must be byte-identical to what it was before the slice (apart
+    // from sheetId): no senders, no messagesScanned, no listMessages, no
+    // coverage.
+    // Day 1's id is fake86400 (the search page for the second day
+    // generates ids from the day offset, which is 86400 seconds).
+    fake.neverRecovers.add('fake86400');
+    const census = makeCensus(dir, fake);
+    const job = census.start(target, T0, T0 + 2 * DAY);
+    await census.idle();
+    assert.equal(job.status, 'failed');
+    const state = loadState(dir)!;
+    // Coverage never advanced.
+    assert.equal(state.coveredAfter, 0);
+    assert.equal(state.coveredBefore, 0);
+    // BUG B: the day-0 batches succeeded and were aggregated into the
+    // scratch, but the slice threw on day 1, so the real state must be
+    // untouched.
+    assert.equal(Object.keys(state.senders).length, 0, 'senders must be empty after a failed slice');
+    assert.equal(state.messagesScanned, 0, 'messagesScanned must be 0 after a failed slice');
+    assert.equal(state.listMessages, 0, 'listMessages must be 0 after a failed slice');
+    // The unreadable count is in the job error, not the state file.
+    assert.ok(job.error!.includes('unreadable'), `job error should mention unreadable, got: ${job.error}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('integration: running the same window again after a failure, with the fake now healthy, gives totals equal to a single clean run', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailcensus-'));
+  try {
+    // Run 1: day 1 has a neverRecovers id. With the default
+    // failIfUnreadable (true), the slice fails and the state file is
+    // byte-identical to what it was before the slice (apart from sheetId).
+    // Day 0's data is in the scratch but not persisted.
+    const fake1 = new FakeWorkspace();
+    fake1.neverRecovers.add('fake86400');
+    const census1 = makeCensus(dir, fake1);
+    const job1 = census1.start(target, T0, T0 + 2 * DAY);
+    await census1.idle();
+    assert.equal(job1.status, 'failed');
+    const stateAfterFail = loadState(dir)!;
+    assert.equal(stateAfterFail.messagesScanned, 0);
+    assert.equal(Object.keys(stateAfterFail.senders).length, 0);
+
+    // Run 2: same window, fake now healthy. The state file has no coverage,
+    // so the full window is rescanned. Totals must equal a single clean run.
+    const fake2 = new FakeWorkspace();
+    const census2 = makeCensus(dir, fake2);
+    const job2 = census2.start(target, T0, T0 + 2 * DAY);
+    await census2.idle();
+    assert.equal(job2.status, 'done');
+    const summary2 = JSON.parse(job2.report!) as Record<string, unknown>;
+
+    // Clean run in a fresh directory for comparison.
+    const dir2 = mkdtempSync(join(tmpdir(), 'mailcensus-'));
+    try {
+      const fakeClean = new FakeWorkspace();
+      const censusClean = makeCensus(dir2, fakeClean);
+      const jobClean = censusClean.start(target, T0, T0 + 2 * DAY);
+      await censusClean.idle();
+      assert.equal(jobClean.status, 'done');
+      const summaryClean = JSON.parse(jobClean.report!) as Record<string, unknown>;
+      assert.equal(summary2.messagesScanned, summaryClean.messagesScanned, 'messagesScanned must match a clean run');
+      assert.equal(summary2.listMessages, summaryClean.listMessages, 'listMessages must match a clean run');
+      assert.equal(summary2.coveredAfter, summaryClean.coveredAfter);
+      assert.equal(summary2.coveredBefore, summaryClean.coveredBefore);
+    } finally {
+      rmSync(dir2, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('integration: a run with warnings that recover gives totals equal to the same run without warnings', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailcensus-'));
+  try {
+    // Run A: day 0 has a warnOnce id that recovers on retry.
+    const fakeA = new FakeWorkspace();
+    fakeA.warnOnce.add('fake0000');
+    const censusA = makeCensus(dir, fakeA);
+    const jobA = censusA.start(target, T0, T0 + 3 * DAY);
+    await censusA.idle();
+    assert.equal(jobA.status, 'done');
+    const summaryA = JSON.parse(jobA.report!) as Record<string, unknown>;
+
+    // Run B: same window, no warnings, fresh directory.
+    const dir2 = mkdtempSync(join(tmpdir(), 'mailcensus-'));
+    try {
+      const fakeB = new FakeWorkspace();
+      const censusB = makeCensus(dir2, fakeB);
+      const jobB = censusB.start(target, T0, T0 + 3 * DAY);
+      await censusB.idle();
+      assert.equal(jobB.status, 'done');
+      const summaryB = JSON.parse(jobB.report!) as Record<string, unknown>;
+      assert.equal(summaryA.messagesScanned, summaryB.messagesScanned, 'messagesScanned must match the warning-free run');
+      assert.equal(summaryA.listMessages, summaryB.listMessages, 'listMessages must match the warning-free run');
+      assert.equal(summaryA.unreadableTotal, summaryB.unreadableTotal, 'unreadableTotal must be 0 for both');
+      assert.equal(summaryA.coveredAfter, summaryB.coveredAfter);
+      assert.equal(summaryA.coveredBefore, summaryB.coveredBefore);
+    } finally {
+      rmSync(dir2, { recursive: true, force: true });
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

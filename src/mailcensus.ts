@@ -35,10 +35,9 @@ const SLICE = 30 * DAY;
 /** read_sheet_values clamps a range to at most 1000 rows. */
 export const SHEET_READ_ROWS = 1000;
 /**
- * Gmail's per-user quota is about 600 units/minute and a metadata read costs
- * 1 unit, so the walk paces itself to no more than this many messages per
- * minute across all batch calls. A full batch (100 ids) plus the wait below
- * stays under it.
+ * The walk paces itself to no more than this many messages per minute across
+ * all batch calls. Live evidence: 100-id batches come back with 1–4
+ * rateLimitExceeded ids; the quota figure behind that number is unverified.
  */
 export const MESSAGES_PER_MINUTE = 2000;
 /** The wait before retrying a failed batch call or a rate-limited id: 5 s,
@@ -160,9 +159,9 @@ export interface CensusConfig {
 /**
  * The wait that keeps the walk under MESSAGES_PER_MINUTE for a batch of this
  * size. Injected through the config so the tests pass a pace they can
- * observe; the production default (this function) rounds to 0 ms for the
- * small batches the census sends, which is honest: the pacing is a margin,
- * not a guarantee.
+ * observe. At the default 2000 messages/min, a 100-id batch waits about
+ * 2.75 s; smaller batches round to 0 ms, which is honest: the pacing is a
+ * margin, not a guarantee.
  */
 export function paceWait(count: number): number {
   const min = 60_000 / MESSAGES_PER_MINUTE;
@@ -580,12 +579,22 @@ export class MailCensus {
       const slices = this.slicesFor(state, windowStart, windowEnd);
       let unreadableThisRun = 0;
       for (const [s, e] of slices) {
-        try {
-          unreadableThisRun += await this.walkSlice(state, s, e, job.id);
-        } catch (e) {
-          saveState(this.stateDir, state);
-          throw e;
-        }
+        // Slice atomicity: walkSlice aggregates into a scratch copy. Only
+        // when the slice has fully reconciled (no throw) do we merge the
+        // scratch into the real state and save. On any throw the saved
+        // state is byte-identical to what it was before the slice, apart
+        // from sheetId (set by ensureSheet before the loop).
+        const scratch = structuredClone(state);
+        const sliceUnreadable = await this.walkSlice(scratch, s, e, job.id);
+        // Merge the scratch's counters and senders into the real state.
+        // Coverage was already advanced on the scratch by walkSlice.
+        state.messagesScanned = scratch.messagesScanned;
+        state.listMessages = scratch.listMessages;
+        state.unreadableTotal = scratch.unreadableTotal;
+        state.coveredAfter = scratch.coveredAfter;
+        state.coveredBefore = scratch.coveredBefore;
+        state.senders = scratch.senders;
+        unreadableThisRun += sliceUnreadable;
         saveState(this.stateDir, state);
       }
       await this.writeSheet(state);
@@ -642,10 +651,6 @@ export class MailCensus {
     return slices;
   }
 
-  /**
-   * Walk one slice newest-first, committing the covered range when it is
-   * done. Returns the unreadable count for the slice.
-   */
   /**
    * Walk one slice newest-first, committing the covered range when it is
    * done. Returns the unreadable count for the slice.
@@ -776,11 +781,12 @@ export class MailCensus {
     for (const msg of messages) {
       if (!msg.url) msg.url = urls.get(msg.id) ?? null;
     }
-    const list = aggregate(state, messages);
+    let list = aggregate(state, messages);
     // Retry only the ids Gmail could not fetch, with a growing wait. A
     // rate-limit reason is always retryable; every other reason is retried
     // too, and an id that still fails after the last attempt is unreadable,
     // which fails the slice and keeps coverage from advancing.
+    const recoveredIds = new Set<string>();
     for (const [id, reason] of [...warnings]) {
       // The warning retries are a loop of attempts: each attempt is a
       // single-id batch call with the growing wait before it. An attempt is
@@ -816,8 +822,9 @@ export class MailCensus {
           for (const msg of retryMessages) {
             if (!msg.url) msg.url = urls.get(msg.id) ?? null;
           }
-          aggregate(state, retryMessages);
+          list += aggregate(state, retryMessages);
           recovered = true;
+          recoveredIds.add(id);
           break;
         }
         if (retryWarnings.has(id)) {
@@ -839,7 +846,11 @@ export class MailCensus {
         throw new Error(`message ${id} unreadable after ${CALL_ATTEMPTS} attempts (${reason})`);
       }
     }
-    return { unreadable: [...warnings].filter(([id]) => !messages.some((m) => m.id === id)).length, list };
+    // An id is unreadable only if it was warned and never recovered. A
+    // recovered id is in messages (via the retry's aggregate), so the old
+    // filter against the first response alone would have counted it.
+    const unreadable = [...warnings].filter(([id]) => !recoveredIds.has(id)).length;
+    return { unreadable, list };
   }
 
   /**
