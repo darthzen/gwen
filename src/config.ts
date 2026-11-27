@@ -132,6 +132,8 @@ export interface Config {
   buzz: BuzzConfig | null;
   /** Present only when the telegram adapter is enabled. */
   telegram: TelegramConfig | null;
+  /** The mailing-list census (see README, census section). */
+  census: { email: string; sheetName: string };
 }
 
 function text(name: string, fallback?: string): string {
@@ -264,5 +266,9 @@ export function loadConfig(): Config {
           owner: text('TELEGRAM_OWNER').replace(/^@/, '').toLowerCase(),
         }
       : null,
+    census: {
+      email: text('GWEN_CENSUS_EMAIL', 'rick@theashfords.org'),
+      sheetName: text('GWEN_CENSUS_SHEET_NAME', 'Mailing list census'),
+    },
   };
 }

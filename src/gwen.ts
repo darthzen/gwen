@@ -11,7 +11,7 @@ import { Hindsight } from './memory.js';
 import { createClient, finish, maxSteps, modelFields } from './openrouter.js';
 import { KeyedQueue } from './queue.js';
 import { Research } from './research.js';
-import { MailCensus } from './mailcensus.js';
+import { MailCensus, paceWait } from './mailcensus.js';
 import { Sandbox } from './sandbox.js';
 import { loadSkills, skillIndex } from './skills.js';
 import { Store, type Job } from './store.js';
@@ -106,7 +106,13 @@ export class Gwen {
     );
     this.census = new MailCensus(
       cfg.dataDir,
-      { email: 'rick@theashfords.org', mcpServer: 'workspace', sheetName: 'Mailing list census' },
+      {
+        email: cfg.census.email,
+        mcpServer: 'workspace',
+        sheetName: cfg.census.sheetName,
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        pace: paceWait,
+      },
       (tool, args) => this.mcp.call('workspace', tool, args),
       this.store,
       (job) => this.deliver(job),

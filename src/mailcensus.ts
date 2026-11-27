@@ -34,6 +34,20 @@ const METADATA_BATCH = 100;
 const SLICE = 30 * DAY;
 /** read_sheet_values clamps a range to at most 1000 rows. */
 export const SHEET_READ_ROWS = 1000;
+/**
+ * Gmail's per-user quota is about 600 units/minute and a metadata read costs
+ * 1 unit, so the walk paces itself to no more than this many messages per
+ * minute across all batch calls. A full batch (100 ids) plus the wait below
+ * stays under it.
+ */
+export const MESSAGES_PER_MINUTE = 2000;
+/** The wait before retrying a failed batch call or a rate-limited id: 5 s,
+ * doubling each attempt, capped at 60 s. */
+export const RETRY_BASE_MS = 5_000;
+export const RETRY_CAP_MS = 60_000;
+/** A failed call or a rate-limited id is retried this many times before the
+ * slice gives up on it. */
+export const CALL_ATTEMPTS = 4;
 
 // Parsers for the live output. The fixtures in test/fixtures-mailcensus.ts
 // were captured from the real server on 2026-11-27; the tests parse those.
@@ -45,6 +59,12 @@ const WEB_LINK = /^\s*Web Link:\s*(\S+)/;
 const PAGE_TOKEN = /page_token='([^']+)'/;
 /** The batch result prints "N" in its first line; the blocks are real. */
 const BATCH_COUNT = /^Retrieved (\d+) message/m;
+/**
+ * A batch entry Gmail could not fetch: one warning line per failed id,
+ * the reason in the last quoted token. The call itself succeeds, so the
+ * "Retrieved N" count includes these and the parser must split them out.
+ */
+const WARNING_LINE = /^\u26a0\ufe0f Message (\S+): (.*)$/;
 /** The sheet the census writes to, one line per row: number, then cells. */
 const SHEET_ROW = /^\d+\t/;
 
@@ -117,6 +137,36 @@ export interface CensusConfig {
   mcpServer: string;
   /** The sheet the census writes to, created on first run. */
   sheetName: string;
+  /**
+   * The wait between retry attempts and batch calls. Injected so the tests
+   * pass a counter instead of really sleeping.
+   */
+  sleep: (ms: number) => Promise<void>;
+  /**
+   * The wait before a batch call, in ms, as a function of the batch size.
+   * Injected so the tests pass a pace they can observe; the production
+   * default is paceWait.
+   */
+  pace: (count: number) => number;
+  /**
+   * Fail the slice when any id in it is unreadable. Default true: an id
+   * that is still unreadable after its retries has not been counted, so the
+   * covered range must not advance past it. A long backfill that must not
+   * stop on one message opts out.
+   */
+  failIfUnreadable?: boolean;
+}
+
+/**
+ * The wait that keeps the walk under MESSAGES_PER_MINUTE for a batch of this
+ * size. Injected through the config so the tests pass a pace they can
+ * observe; the production default (this function) rounds to 0 ms for the
+ * small batches the census sends, which is honest: the pacing is a margin,
+ * not a guarantee.
+ */
+export function paceWait(count: number): number {
+  const min = 60_000 / MESSAGES_PER_MINUTE;
+  return Math.max(0, Math.ceil(count * min - 250));
 }
 
 /** The Gmail search query for a slice: everything received, minus sent, drafts and chats. */
@@ -163,6 +213,24 @@ export function parseRetrievedCount(text: string): number {
   const m = text.match(/^Retrieved (\d+) messages/m);
   if (!m) throw new Error(`metadata batch has no "Retrieved N messages" line: ${text.slice(0, 120)}`);
   return Number(m[1]);
+}
+
+/**
+ * The ids a batch could not fetch: the ⚠️ lines, each with its reason (the
+ * last quoted token of the warning, e.g. `rateLimitExceeded`). A rate-limit
+ * reason is always retryable; the census treats every reason as such and
+ * lets the retries decide.
+ */
+export function parseMetadataWarnings(text: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const line of text.split('\n')) {
+    const m = line.match(WARNING_LINE);
+    if (!m || m[1] === undefined || m[2] === undefined) continue;
+    const quoted = [...m[2].matchAll(/'([^']*)'/g)].map((q) => q[1]!);
+    const reason = (quoted.length > 0 ? quoted[quoted.length - 1]! : m[2]).trim();
+    out.set(m[1], reason || 'unknown');
+  }
+  return out;
 }
 
 /** One metadata batch: the header block printed for each message. */
@@ -318,6 +386,15 @@ export const SHEET_HEADER = [
 
 const iso = (epochMs: number): string => (epochMs > 0 ? new Date(epochMs).toISOString().slice(0, 10) : '');
 
+/**
+ * A cell for value_input_option USER_ENTERED: Sheets parses "6" to the
+ * number 6, but text that would become a formula or a reference gets a
+ * leading apostrophe so it stays text.
+ */
+export function sheetCell(value: string): string {
+  return /^[=+@-]/.test(value) ? `'${value}` : value;
+}
+
 /** The sheet rows for the state, Keep values matched by address. */
 export function sheetRows(state: CensusState, keep: Map<string, string>): string[][] {
   const rows = [SHEET_HEADER];
@@ -326,15 +403,15 @@ export function sheetRows(state: CensusState, keep: Map<string, string>): string
   );
   for (const s of senders) {
     rows.push([
-      keep.get(s.address) ?? '',
-      s.name,
-      s.address,
-      String(s.count),
-      iso(s.firstSeen),
-      iso(s.lastSeen),
-      s.listUnsubscribe ?? '',
-      s.example.url ?? messageUrl(s.example.id),
-      s.listId ?? '',
+      sheetCell(keep.get(s.address) ?? ''),
+      sheetCell(s.name),
+      sheetCell(s.address),
+      sheetCell(String(s.count)),
+      sheetCell(iso(s.firstSeen)),
+      sheetCell(iso(s.lastSeen)),
+      sheetCell(s.listUnsubscribe ?? ''),
+      sheetCell(s.example.url ?? messageUrl(s.example.id)),
+      sheetCell(s.listId ?? ''),
     ]);
   }
   return rows;
@@ -503,7 +580,12 @@ export class MailCensus {
       const slices = this.slicesFor(state, windowStart, windowEnd);
       let unreadableThisRun = 0;
       for (const [s, e] of slices) {
-        unreadableThisRun += await this.walkSlice(state, s, e, job.id);
+        try {
+          unreadableThisRun += await this.walkSlice(state, s, e, job.id);
+        } catch (e) {
+          saveState(this.stateDir, state);
+          throw e;
+        }
         saveState(this.stateDir, state);
       }
       await this.writeSheet(state);
@@ -564,10 +646,17 @@ export class MailCensus {
    * Walk one slice newest-first, committing the covered range when it is
    * done. Returns the unreadable count for the slice.
    */
+  /**
+   * Walk one slice newest-first, committing the covered range when it is
+   * done. Returns the unreadable count for the slice.
+   */
   private async walkSlice(state: CensusState, start: number, end: number, jobId: string): Promise<number> {
+    const t0 = Date.now();
     log.info('mail census walking slice', { jobId, start, end });
     let unreadable = 0;
     let scanned = 0;
+    let list = 0;
+    let retries = 0;
     const foundCounts: number[] = [];
     let pageToken: string | undefined;
     for (;;) {
@@ -577,7 +666,7 @@ export class MailCensus {
         page_size: SEARCH_PAGE,
       };
       if (pageToken) args.page_token = pageToken;
-      const text = asText(await this.mcpCall('search_gmail_messages', args));
+      const text = asText(await this.mcpCallWithRetry('search_gmail_messages', args, (n) => (retries += n)));
       if (/search failed/i.test(text) && !ID_LINE.test(text)) {
         throw new Error(`Gmail search failed: ${text.slice(0, 200)}`);
       }
@@ -592,7 +681,9 @@ export class MailCensus {
       scanned += ids.length;
       if (ids.length === 0) break;
       for (let i = 0; i < ids.length; i += METADATA_BATCH) {
-        unreadable += await this.metadataBatch(state, ids.slice(i, i + METADATA_BATCH), urls);
+        const r = await this.metadataBatch(state, ids.slice(i, i + METADATA_BATCH), urls, (n) => (retries += n));
+        unreadable += r.unreadable;
+        list += r.list;
       }
       if (!next) break;
       pageToken = next;
@@ -603,45 +694,178 @@ export class MailCensus {
     if (scanned !== foundTotal) {
       throw new Error(`slice scanned ${scanned} messages but the search pages claimed ${foundTotal}`);
     }
+    if (unreadable > 0 && this.cfg.failIfUnreadable !== false) {
+      throw new Error(`slice has ${unreadable} unreadable message(s); failIfUnreadable is on`);
+    }
     if (end > state.coveredBefore) state.coveredBefore = end;
     if (state.coveredAfter === 0 || start < state.coveredAfter) state.coveredAfter = start;
+    // One line per slice so a long backfill can be followed in the pod log.
+    log.info('mail census slice done', {
+      jobId,
+      start,
+      end,
+      messages: scanned,
+      listMessages: list,
+      unreadable,
+      retries,
+      seconds: Math.round((Date.now() - t0) / 100) / 10,
+    });
+    // The per-slice scanned count is the state's delta, so the report's
+    // messagesScanned is the state's total, not the per-slice sum.
     return unreadable;
   }
 
-  private async metadataBatch(state: CensusState, ids: string[], urls: Map<string, string>): Promise<number> {
-    const result = await this.mcpCall('get_gmail_messages_content_batch', {
-      user_google_email: this.cfg.email,
-      message_ids: ids,
-      format: 'metadata',
-    });
-    const text = asText(result);
+  private async metadataBatch(
+    state: CensusState,
+    ids: string[],
+    urls: Map<string, string>,
+    onRetry: (n: number) => void,
+  ): Promise<{ unreadable: number; list: number }> {
+    // Pacing: a full batch plus this wait stays under MESSAGES_PER_MINUTE.
+    await this.cfg.sleep(this.cfg.pace(ids.length));
+    const text = asText(
+      await this.mcpCallWithRetry(
+        'get_gmail_messages_content_batch',
+        {
+          user_google_email: this.cfg.email,
+          message_ids: ids,
+          format: 'metadata',
+        },
+        onRetry,
+      ),
+    );
     let messages: ParsedMessage[];
-    let unparsed = 0;
     try {
       messages = parseMetadataBlocks(text);
     } catch (e) {
+      // Every id in the batch is unreadable: count them all and let the
+      // slice decide whether that fails the run.
       state.unreadableTotal += ids.length;
       log.error('mail census batch unparsable', { ids: ids.length, error: errText(e) });
-      return ids.length;
+      return { unreadable: ids.length, list: 0 };
     }
-    // The batch count the server claims must match the blocks we parsed,
-    // the same way the search pages reconcile.
-    const retrieved = parseRetrievedCount(text);
-    if (retrieved !== messages.length) {
-      throw new Error(`metadata batch claims ${retrieved} messages but ${messages.length} blocks were parsed`);
-    }
-    const seen = new Set(messages.map((m) => m.id));
-    for (const id of ids) {
-      if (!seen.has(id)) {
-        state.unreadableTotal += 1;
-        unparsed += 1;
+    // The parsed blocks must be exactly the ids we asked for: a block for an
+    // id we did not ask for, or a missing block, is a parse error, not a
+    // missing id.
+    const asked = new Set(ids);
+    for (const msg of messages) {
+      if (!asked.has(msg.id)) {
+        throw new Error(`metadata batch returned a block for an unrequested id ${msg.id}`);
       }
+    }
+    // The batch count the server claims must match blocks plus the warning
+    // entries: a warning is a message the server counted but could not
+    // fetch, and it is retried below, not treated as missing.
+    const warnings = parseMetadataWarnings(text);
+    const retrieved = parseRetrievedCount(text);
+    const seen = new Set(messages.map((m) => m.id));
+    // The ids that came back neither as a block nor as a warning: the
+    // server never answered them.
+    const missing = ids.filter((id) => !seen.has(id) && !warnings.has(id));
+    if (retrieved !== messages.length + warnings.size + missing.length) {
+      throw new Error(
+        `metadata batch claims ${retrieved} messages but ${messages.length} blocks, ${warnings.size} warnings and ${missing.length} missing ids were parsed`,
+      );
+    }
+    for (const id of missing) {
+      // The id vanished from the response entirely, which the retries will
+      // not fix: count it unreadable now, before the warning retries run.
+      state.unreadableTotal += 1;
+      log.error('mail census id missing from batch', { id });
     }
     for (const msg of messages) {
       if (!msg.url) msg.url = urls.get(msg.id) ?? null;
     }
-    aggregate(state, messages);
-    return unparsed;
+    const list = aggregate(state, messages);
+    // Retry only the ids Gmail could not fetch, with a growing wait. A
+    // rate-limit reason is always retryable; every other reason is retried
+    // too, and an id that still fails after the last attempt is unreadable,
+    // which fails the slice and keeps coverage from advancing.
+    for (const [id, reason] of [...warnings]) {
+      // The warning retries are a loop of attempts: each attempt is a
+      // single-id batch call with the growing wait before it. An attempt is
+      // a recovery when the block comes back, a warning when it does not.
+      let recovered = false;
+      for (let attempt = 1; attempt <= CALL_ATTEMPTS; attempt++) {
+        onRetry(1);
+        const wait = Math.min(RETRY_BASE_MS * 2 ** (attempt - 1), RETRY_CAP_MS);
+        log.info('mail census retrying rate-limited id', { id, reason, attempt, waitMs: wait });
+        await this.cfg.sleep(wait);
+        // The retry is a batch call like any other: it paces too.
+        await this.cfg.sleep(this.cfg.pace(1));
+        const retryText = asText(
+          await this.mcpCallWithRetry(
+            'get_gmail_messages_content_batch',
+            {
+              user_google_email: this.cfg.email,
+              message_ids: [id],
+              format: 'metadata',
+            },
+            onRetry,
+          ),
+        );
+        const retryMessages = parseMetadataBlocks(retryText);
+        const retryWarnings = parseMetadataWarnings(retryText);
+        const retryRetrieved = parseRetrievedCount(retryText);
+        if (retryRetrieved !== retryMessages.length + retryWarnings.size) {
+          throw new Error(
+            `metadata retry claims ${retryRetrieved} messages but ${retryMessages.length} blocks and ${retryWarnings.size} warnings were parsed`,
+          );
+        }
+        if (retryMessages.length > 0) {
+          for (const msg of retryMessages) {
+            if (!msg.url) msg.url = urls.get(msg.id) ?? null;
+          }
+          aggregate(state, retryMessages);
+          recovered = true;
+          break;
+        }
+        if (retryWarnings.has(id)) {
+          // The id warned again: the attempt failed, the loop retries.
+          continue;
+        }
+        // Neither a block nor a warning: the server never answered it.
+        log.error('mail census id missing from retry', { id, attempt });
+        break;
+      }
+      if (!recovered) {
+        // One count per unreadable id, wherever it failed: a missing id is
+        // already counted when it vanished from the batch, and a warning
+        // that never became a block is counted here, not per attempt.
+        if (!missing.includes(id)) state.unreadableTotal += 1;
+        log.error('mail census id unreadable after retries', { id, reason });
+        // The id is unreadable, which fails the slice so the covered range
+        // does not advance past it.
+        throw new Error(`message ${id} unreadable after ${CALL_ATTEMPTS} attempts (${reason})`);
+      }
+    }
+    return { unreadable: [...warnings].filter(([id]) => !messages.some((m) => m.id === id)).length, list };
+  }
+
+  /**
+   * One MCP call with a few retries on a failed call itself (a timeout or a
+   * dropped connection): the same growing wait as the id retries. onRetry
+   * counts every retry for the slice log line.
+   */
+  private async mcpCallWithRetry(
+    tool: string,
+    args: Record<string, unknown>,
+    onRetry: (n: number) => void,
+  ): Promise<unknown> {
+    let last: unknown;
+    for (let attempt = 1; attempt <= CALL_ATTEMPTS; attempt++) {
+      try {
+        return await this.mcpCall(tool, args);
+      } catch (e) {
+        last = e;
+        if (attempt === CALL_ATTEMPTS) break;
+        onRetry(1);
+        const wait = Math.min(RETRY_BASE_MS * 2 ** (attempt - 1), RETRY_CAP_MS);
+        log.info('mail census retrying failed call', { tool, attempt, waitMs: wait, error: errText(e) });
+        await this.cfg.sleep(wait);
+      }
+    }
+    throw last;
   }
 
   /**
@@ -662,7 +886,7 @@ export class MailCensus {
       // rows sent, or the hub rejects the write.
       range_name: 'A1',
       values: rows,
-      value_input_option: 'RAW',
+      value_input_option: 'USER_ENTERED',
     });
   }
 
