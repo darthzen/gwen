@@ -13,7 +13,9 @@ import {
   newCensusState,
   parseFrom,
   parseKeepValues,
+  parseFoundCount,
   parseMetadataBlocks,
+  parseRetrievedCount,
   parseSearchPage,
   saveState,
   SHEET_HEADER,
@@ -413,6 +415,11 @@ class FakeWorkspace {
   fail: { tool: string; error: string } | null = null;
   /** When set, read_sheet_values rejects its call. */
   failRead = false;
+  /**
+   * The count the fake's pages claim on their first line, overriding the
+   * ids it actually prints: a mismatch the census must catch. null = honest.
+   */
+  foundCount: number | null = null;
   private pageDays: number[] = [];
   private pageIdx = 0;
   /** Days after this are empty (the test sets it before a search). */
@@ -424,8 +431,14 @@ class FakeWorkspace {
     const { text, ids } = dayPage(day, this.emptyAfterDays !== null && day >= this.emptyAfterDays);
     // The live server prints the PAGINATION line only when a next page
     // exists; an empty page ends the walk.
-    if (ids.length === 0 || this.pageIdx >= this.pageDays.length) return text;
-    return text + `\n\n📄 PAGINATION: To get the next page, call search_gmail_messages again with page_token='${this.pageIdx}'`;
+    if (ids.length === 0 || this.pageIdx >= this.pageDays.length) return this.pageResult(text);
+    return this.pageResult(text + `\n\n📄 PAGINATION: To get the next page, call search_gmail_messages again with page_token='${this.pageIdx}'`);
+  }
+
+  /** The hub wraps every tool text in { result: "<text>" } (verified live). */
+  private pageResult(text: string): { result: string } {
+    if (this.foundCount === null) return { result: text };
+    return { result: text.replace(/^Found \d+ messages/m, `Found ${this.foundCount} messages`) };
   }
 
   async call(tool: string, args: Record<string, unknown>): Promise<unknown> {
@@ -465,11 +478,11 @@ class FakeWorkspace {
         assert.ok(Array.isArray(ids) && ids.length > 0 && ids.length <= 100);
         assert.equal(args.format, 'metadata');
         const day = Number(ids[0]!.replace(/[^0-9]/g, '').slice(-4));
-        return dayMetadata(day);
+        return { result: dayMetadata(day) };
       }
       case 'create_spreadsheet':
         assert.equal(args.title, 'Mailing list census');
-        return CREATE_SHEET.replace('14d-oozhS6zDNpW8FNphvtnzUzihjjArFhvfq4ZPobgk', this.sheetId);
+        return { result: CREATE_SHEET.replace('14d-oozhS6zDNpW8FNphvtnzUzihjjArFhvfq4ZPobgk', this.sheetId) };
       case 'read_sheet_values': {
         if (this.failRead) throw new Error('read_sheet_values timed out');
         assert.equal(args.spreadsheet_id, this.sheetId);
@@ -481,7 +494,7 @@ class FakeWorkspace {
         // The census reads A:C only, so mirror that: the row number plus the
         // first three cells.
         const lines = this.sheetRows.slice(startRow - 1, endRow).map((r, i) => `${startRow + i}\t${r.slice(0, 3).join('\t')}`);
-        return `Successfully read ${lines.length} rows from range '${range}':\nEach line: sheet row number, then tab-separated cells from column A.\n${lines.join('\n')}`;
+        return { result: `Successfully read ${lines.length} rows from range '${range}':\nEach line: sheet row number, then tab-separated cells from column A.\n${lines.join('\n')}` };
       }
       case 'modify_sheet_values': {
         assert.equal(args.spreadsheet_id, this.sheetId);
@@ -494,7 +507,7 @@ class FakeWorkspace {
           for (const cell of row) assert.equal(typeof cell, 'string', 'values are all strings');
         }
         this.rows = values;
-        return `Successfully updated range 'A1' in spreadsheet ${this.sheetId}. Updated: ${values.flat().length} cells, ${values.length} rows, ${values[0]!.length} columns.`;
+        return { result: `Successfully updated range 'A1' in spreadsheet ${this.sheetId}. Updated: ${values.flat().length} cells, ${values.length} rows, ${values[0]!.length} columns.` };
       }
     }
     throw new Error(`unhandled tool ${tool}`);
@@ -633,19 +646,21 @@ test('integration: a gap in the coverage is refused, naming the working date', a
   }
 });
 
-test('integration: a failed sheet read keeps the run, the report names it', async () => {
+test('integration: a failed sheet read fails the run and leaves the sheet alone', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'mailcensus-'));
   try {
     const fake = new FakeWorkspace();
     const census = makeCensus(dir, fake);
     census.start(target, T0, T0 + 2 * DAY);
     await census.idle();
+    const before = fake.sheetRows.map((r) => [...r]);
     fake.failRead = true;
     const job = census.start(target, T0 + 2 * DAY, T0 + 3 * DAY);
     await census.idle();
-    assert.equal(job.status, 'done');
-    const summary = JSON.parse(job.report!) as Record<string, unknown>;
-    assert.equal(summary.listMessages, 3);
+    assert.equal(job.status, 'failed');
+    assert.match(job.error ?? '', /read_sheet_values timed out/);
+    // The sheet was never rewritten with blank marks.
+    assert.deepEqual(fake.sheetRows, before);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -667,6 +682,140 @@ test('integration: a window with zero messages still settles done and says so', 
     assert.equal(summary.coveredAfter, T0 + 1000 * DAY);
     assert.equal(summary.coveredBefore, T0 + 1000 * DAY + 2 * DAY);
     assert.equal(fake.sheetRows.length, 1, 'header only');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- Round 3: backfill and provable empties --------------------------------
+
+test('parseFoundCount and parseRetrievedCount: the server\'s own claims', () => {
+  assert.equal(parseFoundCount('Found 2 messages matching \'x\':\n'), 2);
+  assert.equal(parseFoundCount(EMPTY_SEARCH), 0);
+  assert.throws(() => parseFoundCount('no count line'));
+  assert.equal(parseRetrievedCount('Retrieved 2 messages:\n'), 2);
+  assert.throws(() => parseRetrievedCount('no count line'));
+});
+
+test('integration: a page whose Found count disagrees fails the job, coverage does not advance', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailcensus-'));
+  try {
+    const fake = new FakeWorkspace();
+    const census = makeCensus(dir, fake);
+    census.start(target, T0, T0 + DAY);
+    await census.idle();
+    // The next run\'s pages claim 3 messages but print 2.
+    fake.foundCount = 3;
+    const job = census.start(target, T0 + DAY, T0 + 2 * DAY);
+    await census.idle();
+    assert.equal(job.status, 'failed');
+    assert.match(job.error ?? '', /claims 3 messages/);
+    const state = loadState(dir)!;
+    assert.equal(state.coveredBefore, T0 + DAY, 'the failed slice did not advance coverage');
+    assert.equal(state.messagesScanned, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('integration: backfill scans [start, coveredAfter) newest-to-oldest and extends coverage backwards', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailcensus-'));
+  try {
+    const fake = new FakeWorkspace();
+    const census = makeCensus(dir, fake);
+    census.start(target, T0, T0 + 2 * DAY);
+    await census.idle();
+    const queriesBefore = fake.calls.filter((c) => c.tool === 'search_gmail_messages').map((c) => String(c.args.query));
+    // A run that reaches 2 days into the past.
+    const job = census.start(target, T0 - 2 * DAY, T0 + 2 * DAY);
+    await census.idle();
+    assert.equal(job.status, 'done');
+    const summary = JSON.parse(job.report!) as Record<string, unknown>;
+    assert.equal(summary.coveredAfter, T0 - 2 * DAY);
+    assert.equal(summary.coveredBefore, T0 + 2 * DAY);
+    assert.equal(summary.messagesScanned, 8);
+    assert.equal(summary.listMessages, 4);
+    const queries = fake.calls.filter((c) => c.tool === 'search_gmail_messages').map((c) => String(c.args.query));
+    // The backfill part came after the first run's searches: one slice
+    // [T0-2d, coveredAfter) = [T0-2d, T0), the missing days only. Each
+    // query appears twice: the second attempt follows a deliberately
+    // failed Keep read, which must not have committed the slice (the
+    // second attempt does).
+    const tail = queries.slice(queriesBefore.length);
+    assert.deepEqual(tail, [
+      `after:${T0 - 2 * DAY} before:${T0} -in:sent -in:drafts -in:chats`,
+      `after:${T0 - 2 * DAY} before:${T0} -in:sent -in:drafts -in:chats`,
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('integration: backfill and forward extension in one run', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailcensus-'));
+  try {
+    const fake = new FakeWorkspace();
+    const census = makeCensus(dir, fake);
+    census.start(target, T0, T0 + 2 * DAY);
+    await census.idle();
+    const queriesBefore = fake.calls.filter((c) => c.tool === 'search_gmail_messages').length;
+    const job = census.start(target, T0 - 2 * DAY, T0 + 4 * DAY);
+    await census.idle();
+    assert.equal(job.status, 'done');
+    const summary = JSON.parse(job.report!) as Record<string, unknown>;
+    assert.equal(summary.coveredAfter, T0 - 2 * DAY);
+    assert.equal(summary.coveredBefore, T0 + 4 * DAY);
+    // The backfill slice rescans the covered middle (it must end at
+    // coveredAfter), so the totals count it: 12 scanned, 6 list mail.
+    assert.equal(summary.messagesScanned, 12);
+    assert.equal(summary.listMessages, 6);
+    const queries = fake.calls.filter((c) => c.tool === 'search_gmail_messages').map((c) => String(c.args.query)).slice(queriesBefore);
+    // Backfill first: one slice [T0-2d, T0+2d) (the covered middle is
+    // rescanned because the slice must end at coveredAfter), then the
+    // forward part (one slice [T0+2d, T0+4d)). Each query appears twice:
+    // the second attempt follows a deliberately failed Keep read, which
+    // must not have committed the slice (the second attempt does).
+    assert.deepEqual(queries, [
+      `after:${T0 - 2 * DAY} before:${T0} -in:sent -in:drafts -in:chats`,
+      `after:${T0 - 2 * DAY} before:${T0} -in:sent -in:drafts -in:chats`,
+      `after:${T0 + 2 * DAY} before:${T0 + 4 * DAY} -in:sent -in:drafts -in:chats`,
+      `after:${T0 + 2 * DAY} before:${T0 + 4 * DAY} -in:sent -in:drafts -in:chats`,
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('integration: a restart mid-backfill continues from the state file', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'mailcensus-'));
+  try {
+    const fake = new FakeWorkspace();
+    const census = makeCensus(dir, fake);
+    census.start(target, T0, T0 + 2 * DAY);
+    await census.idle();
+    // Run 1 of the backfill: two days into the past.
+    census.start(target, T0 - 2 * DAY, T0 + 2 * DAY);
+    await census.idle();
+    const state = loadState(dir)!;
+    assert.equal(state.coveredAfter, T0 - 2 * DAY);
+    assert.equal(state.coveredBefore, T0 + 2 * DAY);
+    const searchesBefore = fake.calls.filter((c) => c.tool === 'search_gmail_messages').length;
+    // The process dies; a new instance continues the backfill further back.
+    const census2 = makeCensus(dir, fake);
+    const job = census2.start(target, T0 - 4 * DAY, T0 + 2 * DAY);
+    await census2.idle();
+    assert.equal(job.status, 'done');
+    const summary = JSON.parse(job.report!) as Record<string, unknown>;
+    assert.equal(summary.coveredAfter, T0 - 4 * DAY);
+    assert.equal(summary.coveredBefore, T0 + 2 * DAY);
+    assert.equal(summary.messagesScanned, 12);
+    // The restart walked the two new days as one slice [T0-4d, T0-2d),
+    // exactly as run 1 walked its two days as one slice.
+    const queries = fake.calls.filter((c) => c.tool === 'search_gmail_messages').map((c) => String(c.args.query)).slice(searchesBefore);
+    assert.deepEqual(queries, [
+      `after:${T0 - 4 * DAY} before:${T0 - 2 * DAY} -in:sent -in:drafts -in:chats`,
+      `after:${T0 - 4 * DAY} before:${T0 - 2 * DAY} -in:sent -in:drafts -in:chats`,
+    ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

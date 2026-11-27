@@ -147,6 +147,24 @@ export function parseSearchPage(text: string): {
   return { ids, urls, pageToken: t && t[1] !== undefined ? t[1] : null };
 }
 
+/**
+ * The count the server claims for a search page, from its first line:
+ * "Found N messages matching ...". Throws when the line is missing — an
+ * empty result must be provable, not assumed.
+ */
+export function parseFoundCount(text: string): number {
+  const m = text.match(/^Found (\d+) messages matching /m);
+  if (!m) throw new Error(`search page has no "Found N messages" line: ${text.slice(0, 120)}`);
+  return Number(m[1]);
+}
+
+/** The count the server claims for a metadata batch: "Retrieved N messages". */
+export function parseRetrievedCount(text: string): number {
+  const m = text.match(/^Retrieved (\d+) messages/m);
+  if (!m) throw new Error(`metadata batch has no "Retrieved N messages" line: ${text.slice(0, 120)}`);
+  return Number(m[1]);
+}
+
 /** One metadata batch: the header block printed for each message. */
 export function parseMetadataBlocks(text: string): ParsedMessage[] {
   const out: ParsedMessage[] = [];
@@ -377,7 +395,10 @@ type McpCall = (tool: string, args: Record<string, unknown>) => Promise<unknown>
 function asText(result: unknown): string {
   if (typeof result === 'string') return result;
   if (result && typeof result === 'object') {
-    const r = result as { content?: unknown; text?: unknown };
+    const r = result as { result?: unknown; content?: unknown; text?: unknown };
+    // The hub hands these tools back as { result: "<the text>" }; the live
+    // wire shape { content: [{ type: 'text', text }] } is the fallback.
+    if (typeof r.result === 'string') return r.result;
     if (typeof r.text === 'string') return r.text;
     if (Array.isArray(r.content)) {
       return r.content
@@ -497,27 +518,42 @@ export class MailCensus {
 
   /**
    * The 30-day slices of the requested window that are not yet covered.
-   * The covered range must stay contiguous: a request that would leave a
-   * gap is refused, saying which start date would work.
+   * A start before the covered range is a backfill: the missing days are
+   * scanned newest-to-oldest in [windowStart, coveredAfter), lowering the
+   * covered start as each slice commits. A start after the covered range is
+   * the old forward extension. The covered range must stay contiguous: a
+   * window that would leave a gap is refused, naming the working date.
    */
   private slicesFor(state: CensusState, windowStart: number, windowEnd: number): [number, number][] {
     if (windowEnd <= windowStart) throw new Error('census window end is not after its start');
+    const slices: [number, number][] = [];
     if (state.coveredAfter > 0 && state.coveredBefore > 0) {
       if (windowEnd < state.coveredBefore) return [];
-      if (windowStart < state.coveredAfter)
-        throw new Error(
-          `census coverage starts ${new Date(state.coveredAfter * 1000).toISOString().slice(0, 10)}; ` +
-            `ask again with a start on or after that date`,
-        );
-      if (windowStart > state.coveredBefore)
+      if (windowStart < state.coveredAfter) {
+        // Backfill: 30-day slices of [windowStart, coveredAfter), newest
+        // first, so the newest unscanned days are committed before the
+        // oldest. Each slice is at most SLICE wide and clamped to the
+        // requested start, so a later run that backfills further lands on
+        // the same slice edges. walkSlice lowers coveredAfter as each
+        // slice finishes.
+        for (let e = state.coveredAfter; e > windowStart; e -= SLICE) {
+          const s = Math.max(e - SLICE, windowStart);
+          slices.push([s, e]);
+        }
+      } else if (windowStart > state.coveredBefore) {
         throw new Error(
           `census coverage is contiguous through ${new Date(state.coveredBefore * 1000).toISOString().slice(0, 10)}; ` +
             `a start on ${new Date(state.coveredBefore * 1000).toISOString().slice(0, 10)} would keep it gap-free`,
         );
+      }
     }
-    const from = state.coveredBefore > 0 ? Math.min(state.coveredBefore, windowEnd) : windowStart;
-    const slices: [number, number][] = [];
-    for (let s = from; s < windowEnd; s += SLICE) {
+    // The forward part: what the window adds past the covered range (all of
+    // it on a first run), in 30-day slices oldest to newest, aligned to the
+    // covered boundary so a later run that backfills further lands on the
+    // same slice edges.
+    let s = state.coveredBefore > 0 ? state.coveredBefore : windowStart;
+    if (s < windowStart) s = windowStart + Math.ceil((windowStart - s) / SLICE) * SLICE;
+    for (; s < windowEnd; s += SLICE) {
       const e = Math.min(s + SLICE, windowEnd);
       if (e > state.coveredBefore) slices.push([s, e]);
     }
@@ -531,6 +567,8 @@ export class MailCensus {
   private async walkSlice(state: CensusState, start: number, end: number, jobId: string): Promise<number> {
     log.info('mail census walking slice', { jobId, start, end });
     let unreadable = 0;
+    let scanned = 0;
+    const foundCounts: number[] = [];
     let pageToken: string | undefined;
     for (;;) {
       const args: Record<string, unknown> = {
@@ -544,12 +582,26 @@ export class MailCensus {
         throw new Error(`Gmail search failed: ${text.slice(0, 200)}`);
       }
       const { ids, urls, pageToken: next } = parseSearchPage(text);
+      // The server's own count must match what we extracted; otherwise the
+      // page was cut off and the slice must fail, not advance coverage.
+      const found = parseFoundCount(text);
+      foundCounts.push(found);
+      if (found !== ids.length) {
+        throw new Error(`search page claims ${found} messages but ${ids.length} ids were parsed`);
+      }
+      scanned += ids.length;
       if (ids.length === 0) break;
       for (let i = 0; i < ids.length; i += METADATA_BATCH) {
         unreadable += await this.metadataBatch(state, ids.slice(i, i + METADATA_BATCH), urls);
       }
       if (!next) break;
       pageToken = next;
+    }
+    // A slice whose extracted ids do not add up to the "Found N" counts is
+    // not empty: failing here keeps the covered range from advancing.
+    const foundTotal = foundCounts.reduce((a, b) => a + b, 0);
+    if (scanned !== foundTotal) {
+      throw new Error(`slice scanned ${scanned} messages but the search pages claimed ${foundTotal}`);
     }
     if (end > state.coveredBefore) state.coveredBefore = end;
     if (state.coveredAfter === 0 || start < state.coveredAfter) state.coveredAfter = start;
@@ -572,6 +624,12 @@ export class MailCensus {
       log.error('mail census batch unparsable', { ids: ids.length, error: errText(e) });
       return ids.length;
     }
+    // The batch count the server claims must match the blocks we parsed,
+    // the same way the search pages reconcile.
+    const retrieved = parseRetrievedCount(text);
+    if (retrieved !== messages.length) {
+      throw new Error(`metadata batch claims ${retrieved} messages but ${messages.length} blocks were parsed`);
+    }
     const seen = new Set(messages.map((m) => m.id));
     for (const id of ids) {
       if (!seen.has(id)) {
@@ -589,18 +647,13 @@ export class MailCensus {
   /**
    * Rewrite the sheet from the state, keeping Rick's Keep marks. The read
    * walks the Keep and Address columns in 1000-row chunks so more than 1000
-   * rows survive; a failed read starts the marks from blank and says so.
+   * rows survive; a failed read fails the run (the sheet is left alone).
    */
   private async writeSheet(state: CensusState): Promise<void> {
     if (!state.sheetId) throw new Error('census has no sheet: create_spreadsheet did not run');
-    let keep: Map<string, string>;
-    try {
-      keep = await this.readKeep(state.sheetId);
-    } catch (e) {
-      // A failed read starts the marks from blank; the run itself goes on.
-      keep = new Map();
-      log.warn('mail census sheet read failed, Keep marks start blank', { error: errText(e) });
-    }
+    // A failed Keep read fails the run and leaves the sheet alone: a
+    // transient error must not rewrite Rick's marks as blank.
+    const keep = await this.readKeep(state.sheetId);
     const rows = sheetRows(state, keep);
     await this.mcpCall('modify_sheet_values', {
       user_google_email: this.cfg.email,
