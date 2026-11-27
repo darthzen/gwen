@@ -178,6 +178,54 @@ and `schedule_delete` tools; the cron is interpreted in `GWEN_TIMEZONE`
   turn on the stored conversation. If the adapter is no longer active, the
   fire is skipped with a log line.
 
+## Mail census
+
+The mail census walks a Gmail inbox in 30-day slices, aggregates list
+subscriptions by sender, and writes the result to a Google Sheet. It is
+designed to run as a background job: start it with a date window, and it
+commits each slice to a state file as it finishes, so a restart resumes
+from the last committed boundary.
+
+### Configuration
+
+| Variable | Default | What it sets |
+|---|---|---|
+| `GWEN_CENSUS_EMAIL` | `rick@theashfords.org` | The Gmail account to scan. |
+| `GWEN_CENSUS_SHEET_NAME` | `Mailing list census` | The title of the Google Sheet created (or reused) for the results. |
+
+The census uses the workspace MCP server (the same one the `google-workspace`
+skill uses) for both Gmail search and Sheet writes. No additional credentials
+are needed beyond what the workspace server already holds.
+
+### How it works
+
+- **Slices.** The date window is split into 30-day slices. Forward
+  extension (newer dates) is walked oldest-to-newest; backfill (older dates)
+  is walked newest-to-oldest. Each slice is committed to the state file
+  before the next one starts.
+- **Rate limiting.** Gmail metadata batches of up to 100 IDs can return
+  `rateLimitExceeded` warnings for individual messages. The census retries
+  those IDs one at a time after a pace wait (2000 ms per message by
+  default, configurable via the `pace` callback in `CensusConfig`).
+- **Unreadable IDs.** If an ID is still unreadable after retries, the
+  `failIfUnreadable` flag (default `true`) fails the slice; coverage does
+  not advance past it. Set it to `false` to skip unreadable IDs with a
+  warning.
+- **Sheet writes.** Sender names that start with `=`, `+`, `-` or `@` get a
+  leading apostrophe so they are not parsed as formulas. The
+  `value_input_option` is `USER_ENTERED` for all writes.
+- **State file.** `mail-census.json` in the data directory tracks
+  `coveredAfter`, `coveredBefore`, per-sender counts, and total messages
+  scanned. A new census instance with the same data directory picks up
+  where the previous one left off.
+
+### Report
+
+On completion the census posts a plain-text summary: the covered date
+range, total messages scanned, list messages, top senders, and the sheet
+URL. The report is formatted by `censusReport()` in `src/mailcensus.ts`.
+
+
 ## Adding a chat platform
 
 Implement `ChatAdapter` from `src/adapters/types.ts` and add one entry to

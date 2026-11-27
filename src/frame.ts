@@ -2,6 +2,7 @@ import { ROUTES, type Routing } from './jev.js';
 import { formatNow } from './transcript.js';
 import type { Memory } from './memory.js';
 import type { Job } from './store.js';
+import { censusReport } from './mailcensus.js';
 
 // The text the front model receives as its user item. Pure functions: every
 // word Gwen is shown about a turn is written here, and can be tested without
@@ -51,7 +52,9 @@ export function frameMessage(f: MessageFrame): string {
 /** A settled research job, handed to the front model to relay. */
 export function frameJobResult(job: Job, ownerName: string): string {
   const outcome =
-    job.status === 'done' ? `status: finished\nreport:\n${job.report}` : `status: failed\nerror: ${job.error}`;
+    job.status === 'done'
+      ? `status: finished\nreport:\n${job.report}`
+      : `status: failed\nerror: ${job.error}`;
   return [
     `[background research result — machine-generated, not a message from ${ownerName}]`,
     `job: ${job.id}`,
@@ -60,6 +63,19 @@ export function frameJobResult(job: Job, ownerName: string): string {
     outcome,
     '',
     `Relay this to ${ownerName} now: bottom line first, then only what they need, keeping the source URLs for claims they may want to check. If it failed, say so in one line and offer to retry.`,
+  ].join('\n');
+}
+
+/** A settled mail-census job: its own framing, not the research one. */
+export function frameCensusResult(job: Job, ownerName: string): string {
+  const outcome =
+    job.status === 'done' ? censusReport(job) : `status: failed\nerror: ${job.error}`;
+  return [
+    `[mail census result — machine-generated, not a message from ${ownerName}]`,
+    `job: ${job.id}`,
+    outcome,
+    '',
+    `Relay this to ${ownerName} now: the numbers in a line or two, then the sheet URL on its own line, verbatim — do not shorten, retype or wrap it. If it failed, say so in one line and offer to retry.`,
   ].join('\n');
 }
 

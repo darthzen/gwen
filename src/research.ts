@@ -37,6 +37,7 @@ export class Research {
 
   constructor(
     private cfg: ResearchConfig,
+    private makeClient: (cfg: ResearchConfig) => OpenRouter,
     private client: OpenRouter,
     private store: Store,
     private tools: WorkerTools,
@@ -98,7 +99,7 @@ export class Research {
     const started = Date.now();
     const deadline = AbortSignal.timeout(this.cfg.timeoutMs);
     try {
-      const run = callModel(this.client, {
+      const run = callModel(this.cfg.requestTimeoutMs ? this.makeClient(this.cfg) : this.client, {
         ...modelFields(this.cfg),
         instructions: INSTRUCTIONS,
         input: `Question: ${job.question}\n\nContext from the conversation:\n${job.context || '(none given)'}\n\nToday is ${now().slice(0, 10)}.${job.libraryTopic ? `\n\n${LIBRARY_NOTE}` : ''}`,

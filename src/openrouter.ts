@@ -7,7 +7,17 @@ import { localHttpClient } from './local.js';
 
 export const OPENROUTER_API = 'https://openrouter.ai/api';
 
-const TIMEOUT_MS = 90_000;
+// The request timeout for a model that names none. A self-hosted model
+// streams at ~49 tokens/s, so the default has to fit its full output:
+// 16,384 tokens is ~5.7 minutes of generation, plus headroom for the slow
+// rounds that end in a long tool call. 90 s cut a reply off at ~4,400
+// tokens; GWEN_MODEL_TIMEOUT_MS raises it further when needed.
+const DEFAULT_TIMEOUT_MS = 420_000;
+
+/** The request timeout for one model: its own when it names one. */
+export function timeoutFor(cfg: ModelConfig): number {
+  return cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+}
 
 // The SDK's default keeps retrying a failing request for an hour, once a
 // minute. A request that fails the same way every time then holds its
@@ -30,7 +40,7 @@ export function createClient(apiKey: string, cfg: ModelConfig): OpenRouter {
       apiKey: cfg.apiKey || 'local',
       serverURL: cfg.baseUrl,
       httpClient: localHttpClient(),
-      timeoutMs: TIMEOUT_MS,
+      timeoutMs: timeoutFor(cfg),
       retryConfig: RETRIES,
     });
   }
@@ -38,7 +48,7 @@ export function createClient(apiKey: string, cfg: ModelConfig): OpenRouter {
     apiKey,
     httpReferer: 'https://github.com/darthzen/gwen',
     appTitle: 'Gwen',
-    timeoutMs: TIMEOUT_MS,
+    timeoutMs: timeoutFor(cfg),
     retryConfig: RETRIES,
   });
 }
