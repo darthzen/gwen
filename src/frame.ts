@@ -63,6 +63,19 @@ export function frameJobResult(job: Job, ownerName: string): string {
   ].join('\n');
 }
 
+/** A settled mail-census job: its own framing, not the research one. */
+export function frameCensusResult(job: Job, ownerName: string): string {
+  const outcome =
+    job.status === 'done' ? `status: finished\nreport:\n${job.report}` : `status: failed\nerror: ${job.error}`;
+  return [
+    `[mail census result — machine-generated, not a message from ${ownerName}]`,
+    `job: ${job.id}`,
+    outcome,
+    '',
+    `Relay this to ${ownerName} now: the numbers in a line or two, then the sheet URL on its own line, verbatim — do not shorten, retype or wrap it. If it failed, say so in one line and offer to retry.`,
+  ].join('\n');
+}
+
 /** What happened to a report that was meant for the library; nothing for an ordinary job. */
 function libraryLine(job: Job): string[] {
   if (!job.library) return [];

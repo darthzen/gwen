@@ -17,16 +17,15 @@ export function mailCensusTools(census: MailCensus, target: ReplyTarget) {
   const startMailCensus = tool({
     name: 'start_mail_census',
     description:
-      'Start the background mailing-list census of Rick\'s Gmail: it walks the mailbox by date window in host code, no message data through the model, and writes one row per list sender to a Google Sheet whose first column "Keep" Rick marks. Returns at once with a job id; the finished summary (sheet URL, window, counts) arrives later as its own message.',
+      "Start the background mailing-list census of Rick's Gmail: it walks the mailbox by date in host code, no message data through the model, and writes one row per list sender to a Google Sheet whose first column \"Keep\" Rick marks. With no arguments it extends the covered range from where the last run stopped to now (or the last 30 days on a first run). Returns at once with a job id; the finished summary (sheet URL, covered range, counts) arrives later as its own message.",
     inputSchema: z.object({
       days: z
         .number()
         .int()
         .min(1)
-        .max(730)
         .default(30)
-        .describe('Window length in days, ending now. Default 30.'),
-      since: isoDay.describe('Start of the window, YYYY-MM-DD. Overrides days.'),
+        .describe('Window length in days, ending now. Default 30. Ignored when since is given.'),
+      since: isoDay.describe('Start of the window, YYYY-MM-DD, no cap: decades are reachable. Overrides days.'),
       until: isoDay.describe('End of the window, YYYY-MM-DD, exclusive. Default now.'),
     }),
     execute: async ({ days, since, until }) => {
@@ -62,7 +61,6 @@ export function mailCensusTools(census: MailCensus, target: ReplyTarget) {
           ? {
               stateFile: statePath(census.stateDir),
               ...summaryOf(state),
-              coveredThrough: state.coveredThrough,
             }
           : null,
       };

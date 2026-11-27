@@ -9,27 +9,44 @@ import { errText, log } from './log.js';
 
 // A census of the mailing lists in Rick's mailbox, done in host code so no
 // message data passes through a model. Gmail is walked by date window:
-// search_gmail_messages by id, then headers in batches of 100 via
+// search_gmail_messages by id, then headers in batches of 25 via
 // get_gmail_messages_content_batch with format=metadata. A message is
 // mailing-list mail iff its headers carry List-Unsubscribe. The result is a
 // Google Sheet, first column "Keep" for Rick to mark, one row per sender.
 //
-// Nothing here is model data: the whole walk is deterministic, state lives in
-// one file under the data dir, and every slice of work is committed as it
-// completes, so a restart continues where it stopped and a rerun over the
-// same window never double counts.
+// One persistent census, not one per window. The state file holds the sheet
+// id forever, the per-sender aggregates, and the covered range
+// [coveredAfter, coveredBefore) in epoch seconds. A run scans only the parts
+// of its window that are not yet covered, in 30-day slices committed as they
+// finish, so a restart continues where it stopped. Nothing per-message is
+// kept: with covered ranges a rerun is a no-op, so there is nothing to
+// de-duplicate.
+//
+// The output format of every workspace-mcp call is pinned by real captures in
+// test/fixtures-mailcensus.ts.
 
-const SEARCH_PAGE = 500;
+const DAY = 86_400;
+/** Gmail caps a search page at 1000 results. */
+const SEARCH_PAGE = 1000;
+/** The batch tool fetches in its own groups of 25; 100 per call is 4 groups. */
 const METADATA_BATCH = 100;
-/** The header line the batch tool prints for each message in a page. */
-const ID_LINE = /^Message ID: (.+)$/m;
-/**
- * A page announces its next page this way. The token may be printed with or
- * without quotes; the live format has not been measured, so both are accepted.
- */
-const PAGE_TOKEN = /page_token=(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_\-]+))/;
-const URL_LINE = /^URL: (.+)$/m;
-const SEARCH_ERROR = /search failed/i;
+/** Coverage is committed in slices this wide, so a restart costs at most one. */
+const SLICE = 30 * DAY;
+/** read_sheet_values clamps a range to at most 1000 rows. */
+export const SHEET_READ_ROWS = 1000;
+
+// Parsers for the live output. The fixtures in test/fixtures-mailcensus.ts
+// were captured from the real server on 2026-11-27; the tests parse those.
+/** A message id on a search page: `  1. Message ID: 1a20...` (indented). */
+const ID_LINE = /^\s*\d+\.\s*Message ID:\s*(\S+)/;
+/** The per-message link on a search page and in a metadata block. */
+const WEB_LINK = /^\s*Web Link:\s*(\S+)/;
+/** A search page announces its next page in single quotes. */
+const PAGE_TOKEN = /page_token='([^']+)'/;
+/** The batch result prints "N" in its first line; the blocks are real. */
+const BATCH_COUNT = /^Retrieved (\d+) message/m;
+/** The sheet the census writes to, one line per row: number, then cells. */
+const SHEET_ROW = /^\d+\t/;
 
 export interface From {
   /** The display name as written in the From header, or '' for none. */
@@ -43,10 +60,10 @@ export interface ParsedMessage {
   from: From;
   /** Parsed date; the epoch in milliseconds, or 0 when unparseable. */
   date: number;
-  /** The first mailto link in the List-Unsubscribe header, or null. */
+  /** The unsubscribe link to offer: https first, mailto second, or null. */
   listUnsubscribe: string | null;
   listId: string | null;
-  /** The per-message URL the search or batch result printed, when it did. */
+  /** The Web Link the search or batch result printed, when it did. */
   url: string | null;
 }
 
@@ -60,37 +77,35 @@ export interface Sender {
   lastSeen: number;
   /** One example message, for the "sample" link in the sheet. */
   example: { id: string; subject: string; url: string | null };
-  /** The unsubscribe link, first non-null seen; null when never seen. */
+  /** The unsubscribe link, first usable one seen; null when never seen. */
   listUnsubscribe: string | null;
   listId: string | null;
 }
 
 export interface CensusState {
-  /** The window in epoch seconds; the search query is built from it. */
-  windowStart: number;
-  windowEnd: number;
-  /** Newest message date (epoch ms) committed so far; the resume point. */
-  coveredThrough: number;
-  /** Every message id committed so far; a rerun skips all of them. */
-  processedIds: string[];
+  /** The covered range in epoch seconds, contiguous: [coveredAfter, coveredBefore). */
+  coveredAfter: number;
+  coveredBefore: number;
+  /** The sheet, created on first run and kept for the life of the census. */
+  sheetId: string | null;
   /** Keyed by lower-cased address. */
   senders: Record<string, Sender>;
-  /** Message id to its date (epoch ms), for messages that are not list mail. */
-  dateById: Record<string, number>;
-  /** Batch messages with no usable From line, and the batch error that hid them. */
-  unreadable: { id: string; reason: string }[];
-  sheetId: string | null;
+  /** Counters over everything scanned so far. */
+  messagesScanned: number;
+  listMessages: number;
+  unreadableTotal: number;
   startedAt: string;
-  finishedAt: string | null;
 }
 
 export interface CensusSummary {
-  windowStart: number;
-  windowEnd: number;
+  coveredAfter: number;
+  coveredBefore: number;
   messagesScanned: number;
   listMessages: number;
   senderCount: number;
-  unreadableCount: number;
+  unreadableTotal: number;
+  /** Unreadable in the run that just finished; 0 when the state is idle. */
+  unreadableThisRun: number;
   sheetUrl: string | null;
   sheetId: string | null;
 }
@@ -104,21 +119,32 @@ export interface CensusConfig {
   sheetName: string;
 }
 
-/** The Gmail search query for a window, in epoch seconds. */
-export function censusQuery(windowStart: number, windowEnd: number): string {
-  return `after:${windowStart} before:${windowEnd} -label:inbox`;
+/** The Gmail search query for a slice: everything received, minus sent, drafts and chats. */
+export function censusQuery(start: number, end: number): string {
+  return `after:${start} before:${end} -in:sent -in:drafts -in:chats`;
 }
 
-/** One search result page: the message ids and the next-page token, if any. */
-export function parseSearchPage(text: string): { ids: string[]; pageToken: string | null } {
+/** One search result page: the message ids, their web links, the next-page token. */
+export function parseSearchPage(text: string): {
+  ids: string[];
+  urls: Map<string, string>;
+  pageToken: string | null;
+} {
   const ids: string[] = [];
+  const urls = new Map<string, string>();
+  let current: string | null = null;
   for (const line of text.split('\n')) {
-    const m = line.match(ID_LINE);
-    if (m && m[1] !== undefined) ids.push(m[1]);
+    const id = line.match(ID_LINE);
+    if (id && id[1] !== undefined) {
+      current = id[1];
+      ids.push(current);
+      continue;
+    }
+    const url = line.match(WEB_LINK);
+    if (url && url[1] !== undefined && current) urls.set(current, url[1]);
   }
   const t = text.match(PAGE_TOKEN);
-  const token = t ? (t[1] ?? t[2] ?? t[3]) : undefined;
-  return { ids, pageToken: token ?? null };
+  return { ids, urls, pageToken: t && t[1] !== undefined ? t[1] : null };
 }
 
 /** One metadata batch: the header block printed for each message. */
@@ -128,7 +154,7 @@ export function parseMetadataBlocks(text: string): ParsedMessage[] {
   for (let i = 0; i < lines.length; i++) {
     const m = lines[i]!.match(/^Message ID: (.+)$/);
     if (!m) continue;
-    const id = m[1] !== undefined ? m[1].trim() : "";
+    const id = m[1] !== undefined ? m[1].trim() : '';
     let subject = '';
     let fromRaw = '';
     let dateRaw = '';
@@ -136,16 +162,15 @@ export function parseMetadataBlocks(text: string): ParsedMessage[] {
     let listId: string | null = null;
     let url: string | null = null;
     for (let j = i + 1; j < lines.length; j++) {
-      const l = lines[j]!;
-      if (/^Message ID: /.test(l)) break;
-      const s = l.trim();
+      const s = lines[j]!.trim();
+      if (/^Message ID: /.test(s)) break;
       if (s.startsWith('Subject:')) subject = s.slice('Subject:'.length).trim();
       else if (s.startsWith('From:')) fromRaw = s.slice('From:'.length).trim();
       else if (s.startsWith('Date:')) dateRaw = s.slice('Date:'.length).trim();
       else if (s.startsWith('List-Unsubscribe:') && !listUnsubscribe)
-        listUnsubscribe = firstMailto(s.slice('List-Unsubscribe:'.length).trim());
+        listUnsubscribe = unsubscribeLink(s.slice('List-Unsubscribe:'.length).trim());
       else if (s.startsWith('List-Id:') && !listId) listId = s.slice('List-Id:'.length).trim();
-      else if (s.startsWith('URL:') && !url) url = s.slice('URL:'.length).trim();
+      else if (s.startsWith('Web Link:') && !url) url = s.slice('Web Link:'.length).trim();
     }
     out.push({
       id,
@@ -167,14 +192,18 @@ export function parseFrom(raw: string): From {
   return { name: '', address: raw.trim() };
 }
 
-/** The first mailto link in a List-Unsubscribe header value, or null. */
-export function firstMailto(value: string): string | null {
-  const m = value.match(/<mailto:([^>]+)>/);
-  if (m && m[1] !== undefined) return `mailto:${m[1]}`;
-  const bare = value.match(/mailto:([^\s>]+)/);
-  if (bare && bare[1] !== undefined) return `mailto:${bare[1]}`;
-  const plain = value.match(/<([^>\s][^>]*)>/);
-  if (plain && plain[1] !== undefined) return plain[1].trim();
+/**
+ * The unsubscribe link to offer Rick: an https link if the header has one,
+ * else a mailto: he clicks these. The raw header value is the fallback.
+ */
+export function unsubscribeLink(value: string): string | null {
+  const links = [...value.matchAll(/<([^>\s][^>]*)>/g)].map((m) => (m[1] ?? '').trim());
+  const https = links.find((l) => /^https:\/\//.test(l));
+  if (https) return https;
+  const mailto = links.find((l) => l.startsWith('mailto:'));
+  if (mailto) return mailto;
+  const bare = value.match(/(https:\/\/\S+|mailto:[^\s>]+)/);
+  if (bare && bare[1] !== undefined) return bare[1];
   return value.trim() || null;
 }
 
@@ -183,79 +212,73 @@ export function messageUrl(id: string): string {
   return `https://mail.google.com/mail/u/0/#inbox/${encodeURIComponent(id)}`;
 }
 
-export function newCensusState(windowStart: number, windowEnd: number): CensusState {
+export function newCensusState(): CensusState {
   return {
-    windowStart,
-    windowEnd,
-    coveredThrough: 0,
-    processedIds: [],
-    senders: {},
-    dateById: {},
-    unreadable: [],
+    coveredAfter: 0,
+    coveredBefore: 0,
     sheetId: null,
+    senders: {},
+    messagesScanned: 0,
+    listMessages: 0,
+    unreadableTotal: 0,
     startedAt: new Date().toISOString(),
-    finishedAt: null,
   };
 }
 
 /**
- * Fold one batch of parsed messages into the state. Returns the ids newly
- * added. A rerun over the same window feeds the same ids back and adds
- * nothing, so nothing is double counted.
+ * Fold one batch of parsed messages into the state. Returns how many of the
+ * messages were list mail. Called once per metadata batch, so the counters
+ * never double count: a slice is committed to the covered range only after
+ * its batches are folded.
  */
-export function aggregate(state: CensusState, messages: ParsedMessage[]): string[] {
-  const fresh: string[] = [];
+export function aggregate(state: CensusState, messages: ParsedMessage[]): number {
+  let list = 0;
   for (const msg of messages) {
-    if (state.processedIds.includes(msg.id)) continue;
-    state.processedIds.push(msg.id);
-    fresh.push(msg.id);
-    if (msg.date > 0) state.dateById[msg.id] = msg.date;
-    if (msg.listUnsubscribe) {
-      const address = msg.from.address.toLowerCase();
-      if (!address) {
-        state.unreadable.push({ id: msg.id, reason: 'List-Unsubscribe with no From address' });
-        continue;
-      }
-      let sender = state.senders[address];
-      if (!sender) {
-        sender = {
-          address,
-          name: msg.from.name,
-          count: 0,
-          firstSeen: 0,
-          lastSeen: 0,
-          example: { id: msg.id, subject: msg.subject, url: msg.url },
-          listUnsubscribe: null,
-          listId: null,
-        };
-        state.senders[address] = sender;
-      }
-      sender.count += 1;
-      if (!sender.name && msg.from.name) sender.name = msg.from.name;
-      if (msg.date > 0) {
-        if (sender.firstSeen === 0 || msg.date < sender.firstSeen) sender.firstSeen = msg.date;
-        if (msg.date > sender.lastSeen) sender.lastSeen = msg.date;
-      }
-      if (!sender.listUnsubscribe && msg.listUnsubscribe) sender.listUnsubscribe = msg.listUnsubscribe;
-      if (!sender.listId && msg.listId) sender.listId = msg.listId;
-      if (!sender.example.url && msg.url) sender.example.url = msg.url;
+    if (msg.date > 0) state.messagesScanned += 1;
+    if (!msg.listUnsubscribe) continue;
+    list += 1;
+    state.listMessages += 1;
+    const address = msg.from.address.toLowerCase();
+    if (!address) {
+      state.unreadableTotal += 1;
+      continue;
     }
+    let sender = state.senders[address];
+    if (!sender) {
+      sender = {
+        address,
+        name: msg.from.name,
+        count: 0,
+        firstSeen: 0,
+        lastSeen: 0,
+        example: { id: msg.id, subject: msg.subject, url: msg.url },
+        listUnsubscribe: null,
+        listId: null,
+      };
+      state.senders[address] = sender;
+    }
+    sender.count += 1;
+    if (!sender.name && msg.from.name) sender.name = msg.from.name;
+    if (msg.date > 0) {
+      if (sender.firstSeen === 0 || msg.date < sender.firstSeen) sender.firstSeen = msg.date;
+      if (msg.date > sender.lastSeen) sender.lastSeen = msg.date;
+    }
+    if (!sender.listUnsubscribe && msg.listUnsubscribe) sender.listUnsubscribe = msg.listUnsubscribe;
+    if (!sender.listId && msg.listId) sender.listId = msg.listId;
+    if (!sender.example.url && msg.url) sender.example.url = msg.url;
   }
-  return fresh;
+  return list;
 }
 
-export function listMessageCount(state: CensusState): number {
-  return Object.values(state.senders).reduce((n, s) => n + s.count, 0);
-}
-
-export function summaryOf(state: CensusState): CensusSummary {
+export function summaryOf(state: CensusState, unreadableThisRun = 0): CensusSummary {
   return {
-    windowStart: state.windowStart,
-    windowEnd: state.windowEnd,
-    messagesScanned: state.processedIds.length,
-    listMessages: listMessageCount(state),
+    coveredAfter: state.coveredAfter,
+    coveredBefore: state.coveredBefore,
+    messagesScanned: state.messagesScanned,
+    listMessages: state.listMessages,
     senderCount: Object.keys(state.senders).length,
-    unreadableCount: state.unreadable.length,
+    unreadableTotal: state.unreadableTotal,
+    unreadableThisRun,
     sheetUrl: state.sheetId ? `https://docs.google.com/spreadsheets/d/${state.sheetId}/edit` : null,
     sheetId: state.sheetId,
   };
@@ -273,7 +296,6 @@ export const SHEET_HEADER = [
   'Last seen',
   'Unsubscribe',
   'Sample',
-  'List-Id',
 ];
 
 const iso = (epochMs: number): string => (epochMs > 0 ? new Date(epochMs).toISOString().slice(0, 10) : '');
@@ -302,36 +324,32 @@ export function sheetRows(state: CensusState, keep: Map<string, string>): string
 
 /**
  * Parse the read_sheet_values result, `row\tcell\tcell...` per line, into
- * address (column C, lower-cased) to the Keep value in column A. The line
- * may begin with the row number: `1\tKeep\tName\t...` — the header row is
- * skipped either way, so only the data rows matter.
+ * address (column C, lower-cased) to the Keep value in column A. The live
+ * format always carries the leading row number; the header row is skipped.
  */
 export function parseKeepValues(text: string): Map<string, string> {
   const keep = new Map<string, string>();
   for (const line of text.split('\n')) {
+    if (!SHEET_ROW.test(line)) continue;
     const cells = line.split('\t');
-    if (cells.length < 3) continue;
-    const [first, second, third] = [cells[0] ?? '', cells[1] ?? '', cells[2] ?? ''];
-    // With a leading row number: first = number, second = Keep, third = Name.
-    // Without: first = Keep, second = Name, third = Address.
-    const hasRowNumber = /^\d+$/.test(first.trim());
-    const keepCell = hasRowNumber ? second : first;
-    const nameCell = hasRowNumber ? third : second;
-    // The address is the cell that looks like an e-mail address.
-    const addressCells = hasRowNumber ? cells.slice(3) : cells.slice(2);
-    const address =
-      addressCells.find((c) => /^[^\s@]+@[^\s@]+$/.test(c.trim()))?.trim().toLowerCase() ?? '';
-    if (!address) continue;
+    // The live format always carries the leading row number, so the cells
+    // shift by one: cells[1] is column A, cells[2] column B, cells[3] column
+    // C. The census sheet (SHEET_HEADER) has the address in column C, the
+    // Keep mark in column A; Rick's existing sheet has no Keep column, so
+    // column B (the name) is the label and column C the address.
+    const a = (cells[1] ?? '').trim();
+    const b = (cells[2] ?? '').trim();
+    const c = (cells[3] ?? '').trim();
+    const address = (c.includes('@') ? c : b).toLowerCase();
+    if (!address || !/^[^\s@]+@[^\s@]+$/.test(address)) continue;
     // Skip the header row.
-    if (nameCell.trim().toLowerCase() === 'name' || address === SHEET_HEADER[2]) continue;
-    keep.set(address, keepCell.trim());
+    if (b.toLowerCase() === 'name' || address === (SHEET_HEADER[2] ?? '').toLowerCase()) continue;
+    // The census sheet (SHEET_HEADER) has the Keep mark in column A; a sheet
+    // without a Keep column carries the label in column A instead, which is
+    // what Rick's existing sheet does.
+    keep.set(address, a);
   }
   return keep;
-}
-
-/** The cell range that covers the rows, for modify_sheet_values. */
-export function rangeFor(rows: number, cols: number): string {
-  return `A1:${String.fromCharCode(64 + cols)}${rows}`;
 }
 
 // State file handling.
@@ -374,13 +392,17 @@ function asText(result: unknown): string {
 export function censusReport(job: Job): string {
   const summary = job.report ? (JSON.parse(job.report) as CensusSummary) : null;
   if (!summary) return `status: failed\nerror: ${job.error}`;
+  const covered =
+    summary.coveredAfter > 0
+      ? `${new Date(summary.coveredAfter * 1000).toISOString().slice(0, 10)} to ${new Date(summary.coveredBefore * 1000).toISOString().slice(0, 10)}`
+      : 'nothing (the window was empty)';
   return [
     'status: finished',
-    `window: ${new Date(summary.windowStart * 1000).toISOString().slice(0, 10)} to ${new Date(summary.windowEnd * 1000).toISOString().slice(0, 10)}`,
+    `covered: ${covered}`,
     `messages scanned: ${summary.messagesScanned}`,
     `mailing-list messages: ${summary.listMessages}`,
     `senders: ${summary.senderCount}`,
-    `unreadable: ${summary.unreadableCount}`,
+    `unreadable: ${summary.unreadableThisRun} in this run, ${summary.unreadableTotal} in total`,
     `sheet: ${summary.sheetUrl ?? '(none written)'}`,
   ].join('\n');
 }
@@ -454,101 +476,87 @@ export class MailCensus {
   private async run(job: Job, windowStart: number, windowEnd: number): Promise<void> {
     const started = Date.now();
     try {
-      const state = this.continueOrStart(windowStart, windowEnd);
-      this.ensureSheet(state);
-      await this.walk(state, job.id);
-      await this.writeSheet(state);
-      state.finishedAt = new Date().toISOString();
+      const state = loadState(this.stateDir) ?? newCensusState();
+      await this.ensureSheet(state);
       saveState(this.stateDir, state);
-      const summary = summaryOf(state);
+      const slices = this.slicesFor(state, windowStart, windowEnd);
+      let unreadableThisRun = 0;
+      for (const [s, e] of slices) {
+        unreadableThisRun += await this.walkSlice(state, s, e, job.id);
+        saveState(this.stateDir, state);
+      }
+      await this.writeSheet(state);
+      saveState(this.stateDir, state);
       job.usage = { rounds: 0, inputTokens: 0, cachedTokens: 0, outputTokens: 0 };
-      this.settle(job, { report: JSON.stringify(summary) });
+      this.settle(job, { report: JSON.stringify(summaryOf(state, unreadableThisRun)) });
     } catch (e) {
       this.settle(job, { error: errText(e) });
     }
     log.info('mail census run', { jobId: job.id, ms: Date.now() - started });
   }
 
-  private continueOrStart(windowStart: number, windowEnd: number): CensusState {
-    const existing = loadState(this.stateDir);
-    if (existing && existing.windowStart === windowStart && existing.windowEnd === windowEnd && !existing.finishedAt) {
-      log.info('mail census resuming', { coveredThrough: existing.coveredThrough, processed: existing.processedIds.length });
-      return existing;
+  /**
+   * The 30-day slices of the requested window that are not yet covered.
+   * The covered range must stay contiguous: a request that would leave a
+   * gap is refused, saying which start date would work.
+   */
+  private slicesFor(state: CensusState, windowStart: number, windowEnd: number): [number, number][] {
+    if (windowEnd <= windowStart) throw new Error('census window end is not after its start');
+    if (state.coveredAfter > 0 && state.coveredBefore > 0) {
+      if (windowEnd < state.coveredBefore) return [];
+      if (windowStart < state.coveredAfter)
+        throw new Error(
+          `census coverage starts ${new Date(state.coveredAfter * 1000).toISOString().slice(0, 10)}; ` +
+            `ask again with a start on or after that date`,
+        );
+      if (windowStart > state.coveredBefore)
+        throw new Error(
+          `census coverage is contiguous through ${new Date(state.coveredBefore * 1000).toISOString().slice(0, 10)}; ` +
+            `a start on ${new Date(state.coveredBefore * 1000).toISOString().slice(0, 10)} would keep it gap-free`,
+        );
     }
-    const state = newCensusState(windowStart, windowEnd);
-    saveState(this.stateDir, state);
-    return state;
+    const from = state.coveredBefore > 0 ? Math.min(state.coveredBefore, windowEnd) : windowStart;
+    const slices: [number, number][] = [];
+    for (let s = from; s < windowEnd; s += SLICE) {
+      const e = Math.min(s + SLICE, windowEnd);
+      if (e > state.coveredBefore) slices.push([s, e]);
+    }
+    return slices;
   }
 
-  private async ensureSheet(state: CensusState): Promise<void> {
-    if (state.sheetId) return;
-    const result = await this.mcpCall('create_spreadsheet', {
-      user_google_email: this.cfg.email,
-      name: this.cfg.sheetName,
-    });
-    const text = asText(result);
-    const id = text.match(/spreadsheets\/d\/([a-zA-Z0-9-_]+)/)?.[1];
-    if (!id) throw new Error(`create_spreadsheet did not return a spreadsheet id: ${text.slice(0, 200)}`);
-    state.sheetId = id;
-    saveState(this.stateDir, state);
-  }
-
-  /** Walk the window newest-first, committing after every search page. */
-  private async walk(state: CensusState, jobId: string): Promise<void> {
-    log.info('mail census walking', { jobId, windowStart: state.windowStart, windowEnd: state.windowEnd });
+  /**
+   * Walk one slice newest-first, committing the covered range when it is
+   * done. Returns the unreadable count for the slice.
+   */
+  private async walkSlice(state: CensusState, start: number, end: number, jobId: string): Promise<number> {
+    log.info('mail census walking slice', { jobId, start, end });
+    let unreadable = 0;
     let pageToken: string | undefined;
     for (;;) {
       const args: Record<string, unknown> = {
         user_google_email: this.cfg.email,
-        query: censusQuery(state.windowStart, state.windowEnd),
+        query: censusQuery(start, end),
         page_size: SEARCH_PAGE,
       };
       if (pageToken) args.page_token = pageToken;
       const text = asText(await this.mcpCall('search_gmail_messages', args));
-      if (SEARCH_ERROR.test(text) && !ID_LINE.test(text)) {
+      if (/search failed/i.test(text) && !ID_LINE.test(text)) {
         throw new Error(`Gmail search failed: ${text.slice(0, 200)}`);
       }
-      const { ids, pageToken: next } = parseSearchPage(text);
-      const urls = this.pageUrls(text);
+      const { ids, urls, pageToken: next } = parseSearchPage(text);
       if (ids.length === 0) break;
       for (let i = 0; i < ids.length; i += METADATA_BATCH) {
-        const batch = ids.slice(i, i + METADATA_BATCH);
-        await this.metadataBatch(state, batch, urls);
-      }
-      const newest = this.pageDate(state, ids);
-      if (newest > state.coveredThrough) {
-        state.coveredThrough = newest;
-        saveState(this.stateDir, state);
+        unreadable += await this.metadataBatch(state, ids.slice(i, i + METADATA_BATCH), urls);
       }
       if (!next) break;
       pageToken = next;
     }
+    if (end > state.coveredBefore) state.coveredBefore = end;
+    if (state.coveredAfter === 0 || start < state.coveredAfter) state.coveredAfter = start;
+    return unreadable;
   }
 
-  private pageUrls(text: string): Map<string, string> {
-    const urls = new Map<string, string>();
-    const lines = text.split('\n');
-    let current: string | null = null;
-    for (const line of lines) {
-      const id = line.match(ID_LINE);
-      if (id && id[1] !== undefined) current = id[1];
-      const url = line.match(URL_LINE);
-      if (url && url[1] !== undefined && current) urls.set(current, url[1]);
-    }
-    return urls;
-  }
-
-  /** The newest committed message date among the ids of one page. */
-  private pageDate(state: CensusState, ids: string[]): number {
-    let newest = 0;
-    for (const id of ids) {
-      const d = state.dateById[id] ?? 0;
-      if (d > newest) newest = d;
-    }
-    return newest;
-  }
-
-  private async metadataBatch(state: CensusState, ids: string[], urls: Map<string, string>): Promise<void> {
+  private async metadataBatch(state: CensusState, ids: string[], urls: Map<string, string>): Promise<number> {
     const result = await this.mcpCall('get_gmail_messages_content_batch', {
       user_google_email: this.cfg.email,
       message_ids: ids,
@@ -556,37 +564,83 @@ export class MailCensus {
     });
     const text = asText(result);
     let messages: ParsedMessage[];
+    let unparsed = 0;
     try {
       messages = parseMetadataBlocks(text);
     } catch (e) {
-      for (const id of ids) state.unreadable.push({ id, reason: `batch unparsable: ${errText(e)}` });
-      saveState(this.stateDir, state);
-      return;
+      state.unreadableTotal += ids.length;
+      log.error('mail census batch unparsable', { ids: ids.length, error: errText(e) });
+      return ids.length;
     }
+    const seen = new Set(messages.map((m) => m.id));
     for (const id of ids) {
-      const msg = messages.find((m) => m.id === id);
-      if (!msg || !msg.from.address) {
-        state.unreadable.push({ id, reason: msg ? 'no From address' : 'no block in batch result' });
+      if (!seen.has(id)) {
+        state.unreadableTotal += 1;
+        unparsed += 1;
       }
     }
     for (const msg of messages) {
       if (!msg.url) msg.url = urls.get(msg.id) ?? null;
     }
     aggregate(state, messages);
-    saveState(this.stateDir, state);
+    return unparsed;
   }
 
+  /**
+   * Rewrite the sheet from the state, keeping Rick's Keep marks. The read
+   * walks the Keep and Address columns in 1000-row chunks so more than 1000
+   * rows survive; a failed read starts the marks from blank and says so.
+   */
   private async writeSheet(state: CensusState): Promise<void> {
-    if (!state.sheetId) return;
-    const read = asText(await this.mcpCall('read_sheet_values', { user_google_email: this.cfg.email, spreadsheet_id: state.sheetId }));
-    const keep = parseKeepValues(read);
+    if (!state.sheetId) throw new Error('census has no sheet: create_spreadsheet did not run');
+    let keep: Map<string, string>;
+    try {
+      keep = await this.readKeep(state.sheetId);
+    } catch (e) {
+      // A failed read starts the marks from blank; the run itself goes on.
+      keep = new Map();
+      log.warn('mail census sheet read failed, Keep marks start blank', { error: errText(e) });
+    }
     const rows = sheetRows(state, keep);
     await this.mcpCall('modify_sheet_values', {
       user_google_email: this.cfg.email,
       spreadsheet_id: state.sheetId,
-      range: rangeFor(rows.length, SHEET_HEADER.length),
+      // Top-left cell only: the declared range must not be wider than the
+      // rows sent, or the hub rejects the write.
+      range_name: 'A1',
       values: rows,
       value_input_option: 'RAW',
     });
+  }
+
+  private async readKeep(sheetId: string): Promise<Map<string, string>> {
+    const keep = new Map<string, string>();
+    for (let startRow = 1; ; startRow += SHEET_READ_ROWS) {
+      const endRow = startRow + SHEET_READ_ROWS - 1;
+      const text = asText(
+        await this.mcpCall('read_sheet_values', {
+          user_google_email: this.cfg.email,
+          spreadsheet_id: sheetId,
+          range_name: `A${startRow}:C${endRow}`,
+        }),
+      );
+      for (const [address, value] of parseKeepValues(text)) keep.set(address, value);
+      // A short or empty read means there are no more rows.
+      const dataRows = text.split('\n').filter((l) => SHEET_ROW.test(l)).length;
+      if (dataRows < SHEET_READ_ROWS) break;
+    }
+    return keep;
+  }
+
+  private async ensureSheet(state: CensusState): Promise<void> {
+    if (state.sheetId) return;
+    const result = await this.mcpCall('create_spreadsheet', {
+      user_google_email: this.cfg.email,
+      title: this.cfg.sheetName,
+    });
+    const text = asText(result);
+    const id = text.match(/\bID:\s*([a-zA-Z0-9-_]+)/)?.[1];
+    if (!id) throw new Error(`create_spreadsheet did not return a spreadsheet id: ${text.slice(0, 200)}`);
+    state.sheetId = id;
   }
 }

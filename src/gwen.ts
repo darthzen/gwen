@@ -1,7 +1,7 @@
 import { callModel, type OpenRouter } from '@openrouter/agent';
 import type { ChatAdapter, Incoming, ReplyTarget } from './adapters/types.js';
 import type { Config } from './config.js';
-import { RecentLines, frameJobResult, frameMessage } from './frame.js';
+import { RecentLines, frameCensusResult, frameJobResult, frameMessage } from './frame.js';
 import { formatNow } from './transcript.js';
 import { Budget, Handoffs, frameCapped, frameInterrupted, frameResume, handoffDirective, stamp, type Pending } from './handoff.js';
 import { routeMessage } from './jev.js';
@@ -200,11 +200,13 @@ export class Gwen {
     });
   }
 
-  /** Hand a settled research job to the front model to relay. */
+  /** Hand a settled research or census job to the front model to relay. */
   private deliver(job: Job): void {
     this.turns.push(job.conversationId, async () => {
-      const sent = await this.respond(job, frameJobResult(job, this.cfg.ownerName), new Date(), [], { kind: 'job-result', job: job.id });
-      if (sent) this.research.markDelivered(job);
+      const isCensus = job.id.startsWith('mc-');
+      const frame = isCensus ? frameCensusResult(job, this.cfg.ownerName) : frameJobResult(job, this.cfg.ownerName);
+      const sent = await this.respond(job, frame, new Date(), [], { kind: 'job-result', job: job.id });
+      if (sent) (isCensus ? this.census : this.research).markDelivered(job);
     });
   }
 
